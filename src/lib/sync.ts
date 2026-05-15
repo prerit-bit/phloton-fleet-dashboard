@@ -258,6 +258,31 @@ async function syncUnitSnapshot(unitNumber: number, nodeId: string) {
   );
 }
 
+// ─── Bounded concurrency pool ────────────────────────────────────────────────
+
+/**
+ * Runs `worker` over `items` with at most `limit` promises in flight.
+ * JS is single-threaded, so the shared cursor / accumulators mutated by
+ * workers are race-free (no await between read and increment of cursor).
+ */
+async function runPool<T>(
+  items: T[],
+  limit: number,
+  worker: (item: T) => Promise<void>
+): Promise<void> {
+  let cursor = 0;
+  const lanes = Array.from(
+    { length: Math.min(Math.max(1, limit), items.length) },
+    async () => {
+      while (cursor < items.length) {
+        const idx = cursor++;
+        await worker(items[idx]);
+      }
+    }
+  );
+  await Promise.all(lanes);
+}
+
 // ─── Main sync orchestrator ──────────────────────────────────────────────────
 
 export async function runSync(): Promise<SyncResult> {
@@ -295,44 +320,51 @@ export async function runSync(): Promise<SyncResult> {
     `[Sync] Strategy: hourly aggregates for data >48h old, raw for recent data`
   );
 
-  // Process units sequentially to avoid overwhelming Anedya
-  for (const unitNum of unitNumbers) {
-    const nodeId = getNodeId(unitNum);
-    if (!nodeId) continue;
+  // Tunable concurrency (env-overridable without a code change). Defaults
+  // chosen to cut a full run from ~17 min to a few min without hammering
+  // Anedya: up to UNIT_CC units, each running VAR_CC variable syncs.
+  const UNIT_CC = Math.max(1, Number(process.env.SYNC_UNIT_CONCURRENCY ?? 5));
+  const VAR_CC = Math.max(1, Number(process.env.SYNC_VAR_CONCURRENCY ?? 4));
+  console.log(
+    `[Sync] Concurrency: ${UNIT_CC} units × ${VAR_CC} vars in flight`
+  );
 
+  await runPool(unitNumbers, UNIT_CC, async (unitNum) => {
+    const nodeId = getNodeId(unitNum);
+    if (!nodeId) return;
+
+    // A snapshot failure must not block this unit's historical sync.
     try {
-      // Sync snapshot (live readings + online status)
       await syncUnitSnapshot(unitNum, nodeId);
       console.log(`[Sync] Unit ${unitNum}: snapshot updated`);
-
-      // Sync historical data for each variable
-      for (const v of numericVars) {
-        try {
-          const points = await syncVariable(
-            unitNum,
-            nodeId,
-            v.key,
-            v.name,
-            v.identifier
-          );
-          totalPoints += points;
-          if (points > 0) {
-            console.log(
-              `[Sync] Unit ${unitNum} / ${v.name}: ${points} points stored`
-            );
-          }
-        } catch (err: any) {
-          const msg = `Unit ${unitNum} / ${v.name}: ${err.message}`;
-          errors.push(msg);
-          console.error(`[Sync] Error: ${msg}`);
-        }
-      }
     } catch (err: any) {
       const msg = `Unit ${unitNum} snapshot: ${err.message}`;
       errors.push(msg);
       console.error(`[Sync] Error: ${msg}`);
     }
-  }
+
+    await runPool(numericVars, VAR_CC, async (v) => {
+      try {
+        const points = await syncVariable(
+          unitNum,
+          nodeId,
+          v.key,
+          v.name,
+          v.identifier
+        );
+        totalPoints += points;
+        if (points > 0) {
+          console.log(
+            `[Sync] Unit ${unitNum} / ${v.name}: ${points} points stored`
+          );
+        }
+      } catch (err: any) {
+        const msg = `Unit ${unitNum} / ${v.name}: ${err.message}`;
+        errors.push(msg);
+        console.error(`[Sync] Error: ${msg}`);
+      }
+    });
+  });
 
   const duration = Math.round((Date.now() - startTime) / 1000);
 
