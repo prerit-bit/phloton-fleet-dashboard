@@ -2,10 +2,12 @@ name: Anedya → Supabase Sync
 
 on:
   schedule:
-    # Every 15 minutes. The sync is incremental + idempotent, so this
-    # keeps the dashboard within ~15 min of real time. (GitHub schedules
-    # can lag a few minutes under load — fine for this workload.)
-    - cron: "*/15 * * * *"
+    # Every 30 minutes. A full incremental run takes ~17 min (29 units ×
+    # ~17 vars, sequential Anedya calls), so 30 min leaves headroom and
+    # avoids overlapping/backlogged runs. No data is lost between runs —
+    # the sync is incremental from a stored cursor; only the dashboard's
+    # "latest" value lags by up to ~30 min.
+    - cron: "*/30 * * * *"
   workflow_dispatch: {}
 
 # Never run two syncs at once (they share Supabase sync_state cursors).
