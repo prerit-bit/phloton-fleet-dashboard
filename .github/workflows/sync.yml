@@ -21,7 +21,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          # Node 22+ ships a native global WebSocket, which
+          # @supabase/supabase-js requires (Node 20 throws without it).
+          node-version: "22"
           cache: "npm"
       - run: npm ci
       - run: npm run sync
