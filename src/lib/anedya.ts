@@ -67,24 +67,45 @@ export interface HistoricalPoint {
 
 // ─── Low-level API calls ───────────────────────────────────────────────────
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 async function apiPost(endpoint: string, body: object): Promise<any> {
-  const res = await fetch(`${BASE_URL}${endpoint}`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Accept: "application/json",
-      Authorization: `Bearer ${getApiKey()}`,
-    },
-    body: JSON.stringify(body),
-    cache: "no-store",
-  });
+  // Retry transient failures (network "fetch failed", 429, 5xx). The
+  // concurrent sync occasionally trips Anedya; a couple of retries with
+  // backoff turn those into successes instead of cascading errors.
+  const MAX_ATTEMPTS = 3;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      const res = await fetch(`${BASE_URL}${endpoint}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+          Authorization: `Bearer ${getApiKey()}`,
+        },
+        body: JSON.stringify(body),
+        cache: "no-store",
+      });
 
-  if (!res.ok) {
-    console.error(`Anedya API error: ${res.status} on ${endpoint}`);
-    return null;
+      if (res.ok) return res.json();
+
+      if ((res.status >= 500 || res.status === 429) && attempt < MAX_ATTEMPTS) {
+        await sleep(attempt * 800);
+        continue;
+      }
+      console.error(`Anedya API error: ${res.status} on ${endpoint}`);
+      return null;
+    } catch (err) {
+      // Thrown = network failure ("fetch failed"). Retry, then rethrow.
+      if (attempt < MAX_ATTEMPTS) {
+        await sleep(attempt * 800);
+        continue;
+      }
+      console.error(`Anedya fetch failed after ${MAX_ATTEMPTS} on ${endpoint}`);
+      throw err;
+    }
   }
-
-  return res.json();
+  return null;
 }
 
 // ─── Device Status ─────────────────────────────────────────────────────────
