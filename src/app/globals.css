@@ -1,0 +1,44 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --teal: #00C9A7;
+  --navy: #1A1A2E;
+  --offwhite: #F7F8FA;
+}
+
+body {
+  background-color: var(--offwhite);
+  color: var(--navy);
+}
+
+/* Leaflet overrides for dark-themed popups */
+.leaflet-popup-content-wrapper {
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+.unit-popup h3 {
+  margin: 0 0 4px 0;
+  font-weight: 700;
+  font-size: 14px;
+}
+
+.unit-popup .status {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 9999px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.unit-popup .status.online {
+  background: #E6FAF5;
+  color: #00A88A;
+}
+
+.unit-popup .status.offline {
+  background: #FEE2E2;
+  color: #DC2626;
+}

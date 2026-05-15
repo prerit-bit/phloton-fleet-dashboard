@@ -1,0 +1,33 @@
+name: Anedya → Supabase Sync
+
+on:
+  schedule:
+    # Every 15 minutes. The sync is incremental + idempotent, so this
+    # keeps the dashboard within ~15 min of real time. (GitHub schedules
+    # can lag a few minutes under load — fine for this workload.)
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {}
+
+# Never run two syncs at once (they share Supabase sync_state cursors).
+concurrency:
+  group: phloton-anedya-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - run: npm ci
+      - run: npm run sync
+        env:
+          NEXT_PUBLIC_ANEDYA_API_KEY: ${{ secrets.NEXT_PUBLIC_ANEDYA_API_KEY }}
+          NEXT_PUBLIC_NODES_ID: ${{ secrets.NEXT_PUBLIC_NODES_ID }}
+          NEXT_PUBLIC_VARIABLES_IDENTIFIER: ${{ secrets.NEXT_PUBLIC_VARIABLES_IDENTIFIER }}
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
