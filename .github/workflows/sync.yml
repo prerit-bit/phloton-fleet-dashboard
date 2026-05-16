@@ -2,12 +2,12 @@ name: Anedya → Supabase Sync
 
 on:
   schedule:
-    # Every 15 minutes. The sync is now parallelized (~1 min/run), so this
-    # leaves huge headroom and keeps the dashboard's "latest" value within
-    # ~15 min of real time. Incremental + idempotent (cursor-based); no
-    # data is lost between runs. (GitHub schedules can lag a few min under
-    # load — acceptable for this workload.)
-    - cron: "*/15 * * * *"
+    # Every 5 minutes. Repo is public so Actions minutes are free/unlimited.
+    # Sync is parallelized (~1 min/run) + idempotent (cursor-based) and the
+    # concurrency lock below prevents overlap, so a tight cadence is safe.
+    # GitHub's own cron is unreliable — the cron-job.org trigger (also set
+    # to 5 min) is the dependable one; this is the backup.
+    - cron: "*/5 * * * *"
   workflow_dispatch: {}
 
 # Never run two syncs at once (they share Supabase sync_state cursors).
