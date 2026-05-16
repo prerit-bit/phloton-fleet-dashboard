@@ -12,6 +12,7 @@
  */
 
 import { supabaseAdmin } from "./supabase";
+import { locationLine } from "./bot";
 
 const MIN = 60_000;
 const REMINDER_MS = 6 * 60 * MIN; // re-notify cadence while still open
@@ -22,6 +23,8 @@ type Snap = {
   battery_soc: number | null;
   fault_status: string | null;
   last_data_at: string | null;
+  latitude: number | null;
+  longitude: number | null;
 };
 
 type RuleId =
@@ -149,7 +152,9 @@ export async function evaluateAlerts(): Promise<AlertResult> {
     await Promise.all([
       sb
         .from("unit_snapshots")
-        .select("unit_number, flask_temp, battery_soc, fault_status, last_data_at"),
+        .select(
+          "unit_number, flask_temp, battery_soc, fault_status, last_data_at, latitude, longitude"
+        ),
       sb.from("device_alerts").select("*"),
       sb.from("device_owners").select("unit_number, user_id"),
       sb.from("profiles").select("user_id, telegram_id"),
@@ -202,6 +207,8 @@ export async function evaluateAlerts(): Promise<AlertResult> {
     const age = s.last_data_at
       ? now - new Date(s.last_data_at).getTime()
       : Infinity;
+    const locLn = locationLine(s);
+    const locSfx = locLn ? `\n${locLn}` : "";
 
     for (const rule of RULES) {
       if (rule.id === "offline" && suppressOffline) continue;
@@ -262,7 +269,7 @@ export async function evaluateAlerts(): Promise<AlertResult> {
           } else {
             const msg =
               `ALERT — Unit ${s.unit_number}\n` +
-              `${rule.label(s, age)}\n${nowIST()} IST`;
+              `${rule.label(s, age)}\n${nowIST()} IST${locSfx}`;
             await writeState("open", {
               opened_at: new Date().toISOString(),
               last_notified_at: new Date().toISOString(),
@@ -276,7 +283,7 @@ export async function evaluateAlerts(): Promise<AlertResult> {
           if (pendingMs >= rule.sustainMin * MIN) {
             const msg =
               `ALERT — Unit ${s.unit_number}\n` +
-              `${rule.label(s, age)} (sustained ${rule.sustainMin}m+)\n${nowIST()} IST`;
+              `${rule.label(s, age)} (sustained ${rule.sustainMin}m+)\n${nowIST()} IST${locSfx}`;
             await writeState("open", {
               last_notified_at: new Date().toISOString(),
             });
@@ -291,7 +298,7 @@ export async function evaluateAlerts(): Promise<AlertResult> {
           if (sinceNotify >= REMINDER_MS) {
             const msg =
               `REMINDER — Unit ${s.unit_number} still alerting\n` +
-              `${rule.label(s, age)}\n${nowIST()} IST`;
+              `${rule.label(s, age)}\n${nowIST()} IST${locSfx}`;
             await writeState("open", {
               last_notified_at: new Date().toISOString(),
             });

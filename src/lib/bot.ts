@@ -18,7 +18,20 @@ export type Snap = {
   ambient_temp: number | null;
   fault_status: string | null;
   last_data_at: string | null;
+  latitude: number | null;
+  longitude: number | null;
 };
+
+/** Google Maps link + coords, or null if the unit has no location. */
+export function locationLine(s: {
+  latitude: number | null;
+  longitude: number | null;
+}): string | null {
+  if (s.latitude == null || s.longitude == null) return null;
+  const lat = s.latitude.toFixed(5);
+  const lng = s.longitude.toFixed(5);
+  return `Location: ${lat}, ${lng}\nhttps://maps.google.com/?q=${lat},${lng}`;
+}
 
 export type Profile = { user_id: string; role: string | null };
 
@@ -59,6 +72,7 @@ function unitDetail(s: Snap): string {
       `${s.battery_voltage != null ? " (" + s.battery_voltage.toFixed(1) + "V)" : ""}`,
     `Fault: ${s.fault_status && s.fault_status !== "0" ? s.fault_status : "none"}`,
     `Last update: ${fmtIST(s.last_data_at)} IST`,
+    locationLine(s) ?? "Location: unknown",
   ].join("\n");
 }
 
@@ -85,7 +99,7 @@ export async function loadUnitsForProfile(
   let q = admin
     .from("unit_snapshots")
     .select(
-      "unit_number, online, battery_soc, battery_voltage, flask_temp, ambient_temp, fault_status, last_data_at"
+      "unit_number, online, battery_soc, battery_voltage, flask_temp, ambient_temp, fault_status, last_data_at, latitude, longitude"
     )
     .order("unit_number", { ascending: true });
   if (allowedUnits) q = q.in("unit_number", allowedUnits);
