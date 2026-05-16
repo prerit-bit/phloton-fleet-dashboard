@@ -209,14 +209,23 @@ export async function evaluateAlerts(): Promise<AlertResult> {
     }
   }
 
+  // Offline detection is only meaningful for a real fleet that reports
+  // steadily. On a sparse test bench it's pure noise, so it's gated off
+  // by default — set ALERTS_OFFLINE_ENABLED=true for production.
+  const offlineEnabled = process.env.ALERTS_OFFLINE_ENABLED === "true";
+
   // Pre-pass: fleet-wide offline spike among IN-SERVICE units = pipeline
   // outage, not N individual alerts.
   let offlineCount = 0;
-  for (const s of monitored) {
-    if (ageOf(s) > 45 * MIN) offlineCount++;
+  if (offlineEnabled) {
+    for (const s of monitored) {
+      if (ageOf(s) > 45 * MIN) offlineCount++;
+    }
   }
   const suppressOffline =
-    monitored.length > 0 && offlineCount > monitored.length / 2;
+    offlineEnabled &&
+    monitored.length > 0 &&
+    offlineCount > monitored.length / 2;
   r.pipelineOutage = suppressOffline;
 
   const dispatch = async (
@@ -237,7 +246,7 @@ export async function evaluateAlerts(): Promise<AlertResult> {
     const locSfx = locLn ? `\n${locLn}` : "";
 
     for (const rule of RULES) {
-      if (rule.id === "offline" && suppressOffline) continue;
+      if (rule.id === "offline" && (!offlineEnabled || suppressOffline)) continue;
 
       const key = `${s.unit_number}:${rule.id}`;
       const prev = prior.get(key);
@@ -385,7 +394,7 @@ export async function evaluateAlerts(): Promise<AlertResult> {
       );
       if (await sendTelegram(opsChat, msg)) r.notified++;
     }
-  } else if (!suppressOffline && opsChat) {
+  } else if (offlineEnabled && !suppressOffline && opsChat) {
     // Pipeline recovered → close the ops incident (best-effort).
     await sb
       .from("device_alerts")
