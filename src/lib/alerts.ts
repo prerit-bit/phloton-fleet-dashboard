@@ -182,14 +182,41 @@ export async function evaluateAlerts(): Promise<AlertResult> {
   }
   const opsChat = process.env.OPS_TELEGRAM_CHAT_ID;
 
-  // Pre-pass: fleet-wide offline spike = pipeline outage, not 25 alerts.
+  // In-service = reported within 3 days. Dormant units are excluded from
+  // every rule (no noise from idle dev units). A dormant unit that still
+  // has an open/pending incident gets silently cleared (no orphan alerts,
+  // no notification).
+  const WINDOW_MS = 3 * 24 * 60 * MIN;
+  const ageOf = (s: Snap) =>
+    s.last_data_at ? now - new Date(s.last_data_at).getTime() : Infinity;
+  const monitored = snapshots.filter((s) => ageOf(s) <= WINDOW_MS);
+  const dormant = snapshots.filter((s) => ageOf(s) > WINDOW_MS);
+
+  for (const s of dormant) {
+    for (const rule of RULES) {
+      const prev = prior.get(`${s.unit_number}:${rule.id}`);
+      if (prev && (prev.state === "open" || prev.state === "pending")) {
+        await sb
+          .from("device_alerts")
+          .update({
+            state: "cleared",
+            cleared_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          })
+          .eq("unit_number", s.unit_number)
+          .eq("rule", rule.id);
+      }
+    }
+  }
+
+  // Pre-pass: fleet-wide offline spike among IN-SERVICE units = pipeline
+  // outage, not N individual alerts.
   let offlineCount = 0;
-  for (const s of snapshots) {
-    const age = s.last_data_at ? now - new Date(s.last_data_at).getTime() : Infinity;
-    if (age > 45 * MIN) offlineCount++;
+  for (const s of monitored) {
+    if (ageOf(s) > 45 * MIN) offlineCount++;
   }
   const suppressOffline =
-    snapshots.length > 0 && offlineCount > snapshots.length / 2;
+    monitored.length > 0 && offlineCount > monitored.length / 2;
   r.pipelineOutage = suppressOffline;
 
   const dispatch = async (
@@ -204,10 +231,8 @@ export async function evaluateAlerts(): Promise<AlertResult> {
     }
   };
 
-  for (const s of snapshots) {
-    const age = s.last_data_at
-      ? now - new Date(s.last_data_at).getTime()
-      : Infinity;
+  for (const s of monitored) {
+    const age = ageOf(s);
     const locLn = locationLine(s);
     const locSfx = locLn ? `\n${locLn}` : "";
 
@@ -344,7 +369,7 @@ export async function evaluateAlerts(): Promise<AlertResult> {
     if (!prev || prev.state !== "open" || sinceNotify >= REMINDER_MS) {
       const msg =
         `OPS ALERT — possible pipeline outage\n` +
-        `${offlineCount}/${snapshots.length} units have no recent data.\n` +
+        `${offlineCount}/${monitored.length} in-service units have no recent data.\n` +
         `Per-unit offline alerts suppressed. ${nowIST()} IST`;
       await sb.from("device_alerts").upsert(
         {
