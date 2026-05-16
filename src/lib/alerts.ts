@@ -158,7 +158,7 @@ export async function evaluateAlerts(): Promise<AlertResult> {
         ),
       sb.from("device_alerts").select("*"),
       sb.from("device_owners").select("unit_number, user_id"),
-      sb.from("profiles").select("user_id, telegram_id"),
+      sb.from("profiles").select("user_id, telegram_id, role"),
     ]);
 
   const snapshots = (snaps ?? []) as Snap[];
@@ -170,8 +170,12 @@ export async function evaluateAlerts(): Promise<AlertResult> {
 
   // unit_number → [telegram chat ids of owners]
   const tgByUser = new Map<string, string>();
-  for (const p of profs ?? [])
-    if (p.telegram_id) tgByUser.set(p.user_id, String(p.telegram_id));
+  const adminChats: string[] = [];
+  for (const p of profs ?? []) {
+    if (!p.telegram_id) continue;
+    tgByUser.set(p.user_id, String(p.telegram_id));
+    if (p.role === "admin") adminChats.push(String(p.telegram_id));
+  }
   const ownersByUnit = new Map<number, string[]>();
   for (const o of owners ?? []) {
     const tg = tgByUser.get(o.user_id);
@@ -180,7 +184,12 @@ export async function evaluateAlerts(): Promise<AlertResult> {
     list.push(tg);
     ownersByUnit.set(o.unit_number, list);
   }
+  // Broadcast = every admin + an optional ops/group chat. Every alert
+  // goes to all admins (not just one), plus the affected unit's owners.
   const opsChat = process.env.OPS_TELEGRAM_CHAT_ID;
+  const broadcast = Array.from(
+    new Set<string>([...adminChats, ...(opsChat ? [opsChat] : [])])
+  );
 
   // In-service = reported within 3 days. Dormant units are excluded from
   // every rule (no noise from idle dev units). A dormant unit that still
@@ -233,8 +242,10 @@ export async function evaluateAlerts(): Promise<AlertResult> {
     rule: RuleId,
     text: string
   ): Promise<void> => {
-    const set = new Set<string>(ownersByUnit.get(unit) ?? []);
-    if (opsChat) set.add(opsChat);
+    const set = new Set<string>([
+      ...(ownersByUnit.get(unit) ?? []),
+      ...broadcast,
+    ]);
     for (const chat of Array.from(set)) {
       if (await sendTelegram(chat, text)) r.notified++;
     }
@@ -369,7 +380,7 @@ export async function evaluateAlerts(): Promise<AlertResult> {
   }
 
   // One ops message for a suspected pipeline outage (deduped via a row).
-  if (suppressOffline && opsChat && !seedMode) {
+  if (suppressOffline && broadcast.length > 0 && !seedMode) {
     const key = `-1:pipeline_down`;
     const prev = prior.get(key);
     const sinceNotify = prev?.last_notified_at
@@ -392,9 +403,11 @@ export async function evaluateAlerts(): Promise<AlertResult> {
         },
         { onConflict: "unit_number,rule" }
       );
-      if (await sendTelegram(opsChat, msg)) r.notified++;
+      for (const chat of broadcast) {
+        if (await sendTelegram(chat, msg)) r.notified++;
+      }
     }
-  } else if (offlineEnabled && !suppressOffline && opsChat) {
+  } else if (offlineEnabled && !suppressOffline && broadcast.length > 0) {
     // Pipeline recovered → close the ops incident (best-effort).
     await sb
       .from("device_alerts")
