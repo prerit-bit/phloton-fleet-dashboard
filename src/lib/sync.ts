@@ -236,6 +236,14 @@ async function syncUnitSnapshot(unitNumber: number, nodeId: string) {
         }
       : { latitude: null, longitude: null };
 
+  // "Last update" = newest timestamp across ALL snapshot variables, so a
+  // unit reflects its freshest sensor rather than only ambient/SoC (which
+  // can lag on Anedya even while other variables are recent).
+  const tsList = [soc, voltage, flaskTemp, ambientTemp, fault, location]
+    .map((x) => x?.timestamp)
+    .filter((t): t is number => typeof t === "number" && t > 0);
+  const latestTs = tsList.length ? Math.max(...tsList) : null;
+
   await supabase.from("unit_snapshots").upsert(
     {
       unit_number: unitNumber,
@@ -247,11 +255,9 @@ async function syncUnitSnapshot(unitNumber: number, nodeId: string) {
       ambient_temp: ambientTemp.isSuccess ? (ambientTemp.data as number) : null,
       fault_status: fault.isSuccess ? String(fault.data) : null,
       ...loc,
-      last_data_at: ambientTemp.timestamp
-        ? new Date(ambientTemp.timestamp * 1000).toISOString()
-        : soc.timestamp
-          ? new Date(soc.timestamp * 1000).toISOString()
-          : null,
+      last_data_at: latestTs
+        ? new Date(latestTs * 1000).toISOString()
+        : null,
       synced_at: new Date().toISOString(),
     },
     { onConflict: "unit_number" }
