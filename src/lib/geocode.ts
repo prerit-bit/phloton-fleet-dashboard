@@ -11,10 +11,14 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-// 3 decimals ≈ ~110 m — finer than the cell-tower location resolution,
-// so the key only changes on a genuine move.
+// Bump when the geocoding scheme changes (zoom/parsing) so existing
+// cached names are treated as stale and refreshed over a few runs.
+const GEOCODE_VERSION = "v2";
+
+// 3 decimals ≈ ~110 m — the area name won't change within that, so this
+// avoids re-geocoding on normal GPS jitter while still catching real moves.
 function key(lat: number, lng: number): string {
-  return `${lat.toFixed(3)},${lng.toFixed(3)}`;
+  return `${GEOCODE_VERSION}:${lat.toFixed(3)},${lng.toFixed(3)}`;
 }
 
 async function reverseGeocode(
@@ -23,7 +27,7 @@ async function reverseGeocode(
 ): Promise<string | null> {
   try {
     const res = await fetch(
-      `https://nominatim.openstreetmap.org/reverse?format=jsonv2&zoom=10&lat=${lat}&lon=${lng}`,
+      `https://nominatim.openstreetmap.org/reverse?format=jsonv2&zoom=14&lat=${lat}&lon=${lng}`,
       {
         headers: {
           "User-Agent": "phloton-fleet/1.0 (prerit@phloton.com)",
@@ -34,10 +38,14 @@ async function reverseGeocode(
     if (!res.ok) return null;
     const j: any = await res.json();
     const a = j?.address ?? {};
-    const city =
-      a.city || a.town || a.village || a.suburb || a.county || a.state_district;
+    const area =
+      a.neighbourhood || a.suburb || a.quarter || a.hamlet || a.village;
+    const city = a.city || a.town || a.municipality || a.county;
     const region = a.state || a.region;
-    const parts = [city, region].filter(Boolean);
+    // De-duplicate (area can equal city for small places) and cap at 3 parts.
+    const parts = [area, city, region]
+      .filter(Boolean)
+      .filter((v, i, arr) => arr.indexOf(v) === i);
     return parts.length ? parts.join(", ") : j?.display_name ?? null;
   } catch {
     return null;
