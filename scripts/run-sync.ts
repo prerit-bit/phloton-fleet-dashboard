@@ -11,10 +11,21 @@
 
 import { runSync } from "../src/lib/sync";
 import { evaluateAlerts } from "../src/lib/alerts";
+import { backfillLocationNames } from "../src/lib/geocode";
+import { supabaseAdmin } from "../src/lib/supabase";
 
 async function main() {
   const r = await runSync();
   console.log("Sync complete:", JSON.stringify(r));
+
+  try {
+    if (supabaseAdmin) {
+      const n = await backfillLocationNames(supabaseAdmin);
+      if (n > 0) console.log(`Geocoded ${n} unit location(s).`);
+    }
+  } catch (err) {
+    console.error("Geocode backfill failed (non-fatal):", err);
+  }
 
   try {
     const a = await evaluateAlerts();

@@ -20,17 +20,20 @@ export type Snap = {
   last_data_at: string | null;
   latitude: number | null;
   longitude: number | null;
+  location_name: string | null;
 };
 
-/** Google Maps link + coords, or null if the unit has no location. */
+/** Place name (if geocoded) + Maps link + coords, or null if no location. */
 export function locationLine(s: {
   latitude: number | null;
   longitude: number | null;
+  location_name?: string | null;
 }): string | null {
   if (s.latitude == null || s.longitude == null) return null;
   const lat = s.latitude.toFixed(5);
   const lng = s.longitude.toFixed(5);
-  return `Location: ${lat}, ${lng}\nhttps://maps.google.com/?q=${lat},${lng}`;
+  const where = s.location_name ? `${s.location_name} (${lat}, ${lng})` : `${lat}, ${lng}`;
+  return `Location: ${where}\nhttps://maps.google.com/?q=${lat},${lng}`;
 }
 
 export type Profile = { user_id: string; role: string | null };
@@ -99,7 +102,7 @@ export async function loadUnitsForProfile(
   let q = admin
     .from("unit_snapshots")
     .select(
-      "unit_number, online, battery_soc, battery_voltage, flask_temp, ambient_temp, fault_status, last_data_at, latitude, longitude"
+      "unit_number, online, battery_soc, battery_voltage, flask_temp, ambient_temp, fault_status, last_data_at, latitude, longitude, location_name"
     )
     .order("unit_number", { ascending: true });
   if (allowedUnits) q = q.in("unit_number", allowedUnits);

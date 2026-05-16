@@ -25,6 +25,7 @@ type Snap = {
   last_data_at: string | null;
   latitude: number | null;
   longitude: number | null;
+  location_name: string | null;
 };
 
 type RuleId =
@@ -153,7 +154,7 @@ export async function evaluateAlerts(): Promise<AlertResult> {
       sb
         .from("unit_snapshots")
         .select(
-          "unit_number, flask_temp, battery_soc, fault_status, last_data_at, latitude, longitude"
+          "unit_number, flask_temp, battery_soc, fault_status, last_data_at, latitude, longitude, location_name"
         ),
       sb.from("device_alerts").select("*"),
       sb.from("device_owners").select("unit_number, user_id"),
