@@ -285,7 +285,13 @@ async function runPool<T>(
 
 // ─── Main sync orchestrator ──────────────────────────────────────────────────
 
-export async function runSync(): Promise<SyncResult> {
+export async function runSync(
+  opts: { snapshotOnly?: boolean } = {}
+): Promise<SyncResult> {
+  // snapshotOnly: refresh only unit_snapshots (latest values the bot &
+  // alerts read) — skips the heavy per-variable historical backfill.
+  // Finishes in seconds, light on Anedya → safe to run every minute.
+  const snapshotOnly = opts.snapshotOnly === true;
   if (!supabase) {
     throw new Error("Supabase service role key not configured");
   }
@@ -342,6 +348,8 @@ export async function runSync(): Promise<SyncResult> {
       errors.push(msg);
       console.error(`[Sync] Error: ${msg}`);
     }
+
+    if (snapshotOnly) return; // skip historical backfill in fast mode
 
     await runPool(numericVars, VAR_CC, async (v) => {
       try {

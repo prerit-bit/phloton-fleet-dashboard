@@ -1,36 +1,30 @@
-name: Anedya → Supabase Sync
+name: Fast Snapshot Sync
 
 on:
   schedule:
-    # Every 5 minutes. Repo is public so Actions minutes are free/unlimited.
-    # Sync is parallelized (~1 min/run) + idempotent (cursor-based) and the
-    # concurrency lock below prevents overlap, so a tight cadence is safe.
-    # GitHub's own cron is unreliable — the cron-job.org trigger (also set
-    # to 5 min) is the dependable one; this is the backup.
+    # GitHub's own cron can't go below 5 min — this is just a backup.
+    # The real 1-minute cadence comes from a cron-job.org trigger hitting
+    # this workflow's dispatch endpoint.
     - cron: "*/5 * * * *"
   workflow_dispatch: {}
 
-# Shared with the fast snapshots workflow — only ONE of (full sync,
-# snapshot sync) runs at a time (they touch the same cursors + alert
-# state). Others queue rather than overlap.
+# Shared lock with the full sync (sync.yml) — never run both at once.
 concurrency:
   group: phloton-sync
   cancel-in-progress: false
 
 jobs:
-  sync:
+  snapshots:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          # Node 22+ ships a native global WebSocket, which
-          # @supabase/supabase-js requires (Node 20 throws without it).
           node-version: "22"
           cache: "npm"
       - run: npm ci
-      - run: npm run sync
+      - run: npm run sync:snapshots
         env:
           NEXT_PUBLIC_ANEDYA_API_KEY: ${{ secrets.NEXT_PUBLIC_ANEDYA_API_KEY }}
           NEXT_PUBLIC_NODES_ID: ${{ secrets.NEXT_PUBLIC_NODES_ID }}
