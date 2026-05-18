@@ -1,16 +1,13 @@
 /**
- * Standalone sync + alert entrypoint for the scheduled GitHub Actions job.
+ * Full historical sync entrypoint (5-min GitHub Actions job).
  *
- * 1. Sync Anedya → Supabase (no serverless time cap).
- * 2. Evaluate alert rules on the fresh snapshots and notify owners/ops.
- *
- * Alert evaluation is best-effort: a failure there is logged but never
- * fails the workflow (data already synced; we don't want alert plumbing
- * to page anyone). Env vars come from GitHub Actions secrets.
+ * Syncs Anedya → Supabase (sensor_readings + snapshots) and geocodes.
+ * Alert evaluation lives in the 1-min snapshot job ONLY — this workflow
+ * and the snapshot workflow now run in independent concurrency groups,
+ * so evaluating alerts in both would race on alert state.
  */
 
 import { runSync } from "../src/lib/sync";
-import { evaluateAlerts } from "../src/lib/alerts";
 import { backfillLocationNames } from "../src/lib/geocode";
 import { supabaseAdmin } from "../src/lib/supabase";
 
@@ -25,13 +22,6 @@ async function main() {
     }
   } catch (err) {
     console.error("Geocode backfill failed (non-fatal):", err);
-  }
-
-  try {
-    const a = await evaluateAlerts();
-    console.log("Alerts:", JSON.stringify(a));
-  } catch (err) {
-    console.error("Alert evaluation failed (non-fatal):", err);
   }
 
   // Only fail the workflow (→ alert email) on a *real* sync problem, not

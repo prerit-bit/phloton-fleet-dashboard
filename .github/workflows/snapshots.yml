@@ -9,9 +9,13 @@ on:
   workflow_dispatch: {}
 
 # Shared lock with the full sync (sync.yml) — never run both at once.
+# Own group (NOT shared with the full sync). The snapshot job doesn't
+# touch sync_state cursors, so it needn't be locked against the full
+# sync — sharing a lock just starved it. cancel-in-progress: a new
+# 1-min run supersedes a stuck older one (newest data wins).
 concurrency:
-  group: phloton-sync
-  cancel-in-progress: false
+  group: phloton-snapshot
+  cancel-in-progress: true
 
 jobs:
   snapshots:

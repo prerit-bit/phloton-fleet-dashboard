@@ -70,10 +70,11 @@ export interface HistoricalPoint {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 async function apiPost(endpoint: string, body: object): Promise<any> {
-  // Retry transient failures (network "fetch failed", 429, 5xx). The
-  // concurrent sync occasionally trips Anedya; a couple of retries with
-  // backoff turn those into successes instead of cascading errors.
-  const MAX_ATTEMPTS = 3;
+  // Retry transient failures (network "fetch failed", 429, 5xx) — but
+  // cheaply. During a full Anedya endpoint outage every call 500s; heavy
+  // retry/backoff × ~150 calls made the snapshot job crawl and starve.
+  // The sensor_readings fallback covers latest-endpoint failures anyway.
+  const MAX_ATTEMPTS = 2;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
       const res = await fetch(`${BASE_URL}${endpoint}`, {
@@ -90,7 +91,7 @@ async function apiPost(endpoint: string, body: object): Promise<any> {
       if (res.ok) return res.json();
 
       if ((res.status >= 500 || res.status === 429) && attempt < MAX_ATTEMPTS) {
-        await sleep(attempt * 800);
+        await sleep(attempt * 400);
         continue;
       }
       console.error(`Anedya API error: ${res.status} on ${endpoint}`);
@@ -98,7 +99,7 @@ async function apiPost(endpoint: string, body: object): Promise<any> {
     } catch (err) {
       // Thrown = network failure ("fetch failed"). Retry, then rethrow.
       if (attempt < MAX_ATTEMPTS) {
-        await sleep(attempt * 800);
+        await sleep(attempt * 400);
         continue;
       }
       console.error(`Anedya fetch failed after ${MAX_ATTEMPTS} on ${endpoint}`);

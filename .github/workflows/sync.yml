@@ -10,11 +10,11 @@ on:
     - cron: "*/5 * * * *"
   workflow_dispatch: {}
 
-# Shared with the fast snapshots workflow — only ONE of (full sync,
-# snapshot sync) runs at a time (they touch the same cursors + alert
-# state). Others queue rather than overlap.
+# Own group: serialize full syncs (they own the sync_state cursors) but
+# never block the independent snapshot job. Don't cancel a long
+# historical run — queue instead.
 concurrency:
-  group: phloton-sync
+  group: phloton-fullsync
   cancel-in-progress: false
 
 jobs:
