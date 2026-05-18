@@ -228,40 +228,76 @@ async function syncUnitSnapshot(unitNumber: number, nodeId: string) {
       getLatestData(nodeId, "location"),
     ]);
 
-  const loc =
-    location.isSuccess && location.data
-      ? {
-          latitude: (location.data as Record<string, number>).lat,
-          longitude: (location.data as Record<string, number>).long,
-        }
-      : { latitude: null, longitude: null };
+  // Field plan: prefer Anedya /data/latest; if that endpoint is failing
+  // (it 500s during Anedya outages), fall back to the newest value we
+  // already have in sensor_readings (the historical endpoint stays up).
+  // Anything still unknown is OMITTED from the upsert so we never clobber
+  // a previously-good value with null.
+  const plan: {
+    col: string;
+    key: string;
+    res: typeof soc;
+    str?: boolean;
+  }[] = [
+    { col: "battery_soc", key: "variable_1", res: soc },
+    { col: "battery_voltage", key: "variable_2", res: voltage },
+    { col: "flask_temp", key: "variable_3", res: flaskTemp },
+    { col: "ambient_temp", key: "variable_4", res: ambientTemp },
+    { col: "fault_status", key: "variable_5", res: fault, str: true },
+  ];
 
-  // "Last update" = newest timestamp across ALL snapshot variables, so a
-  // unit reflects its freshest sensor rather than only ambient/SoC (which
-  // can lag on Anedya even while other variables are recent).
-  const tsList = [soc, voltage, flaskTemp, ambientTemp, fault, location]
-    .map((x) => x?.timestamp)
-    .filter((t): t is number => typeof t === "number" && t > 0);
-  const latestTs = tsList.length ? Math.max(...tsList) : null;
+  const row: Record<string, any> = {
+    unit_number: unitNumber,
+    node_id: nodeId,
+    synced_at: new Date().toISOString(),
+  };
+  const tsMs: number[] = [];
 
-  await supabase.from("unit_snapshots").upsert(
-    {
-      unit_number: unitNumber,
-      node_id: nodeId,
-      online: status,
-      battery_soc: soc.isSuccess ? (soc.data as number) : null,
-      battery_voltage: voltage.isSuccess ? (voltage.data as number) : null,
-      flask_temp: flaskTemp.isSuccess ? (flaskTemp.data as number) : null,
-      ambient_temp: ambientTemp.isSuccess ? (ambientTemp.data as number) : null,
-      fault_status: fault.isSuccess ? String(fault.data) : null,
-      ...loc,
-      last_data_at: latestTs
-        ? new Date(latestTs * 1000).toISOString()
-        : null,
-      synced_at: new Date().toISOString(),
-    },
-    { onConflict: "unit_number" }
-  );
+  for (const p of plan) {
+    if (p.res.isSuccess && p.res.data != null) {
+      row[p.col] = p.str ? String(p.res.data) : (p.res.data as number);
+      if (typeof p.res.timestamp === "number" && p.res.timestamp > 0)
+        tsMs.push(p.res.timestamp * 1000);
+    } else {
+      // Fallback: latest sensor_readings row for this unit+variable.
+      const { data: last } = await supabase
+        .from("sensor_readings")
+        .select("value, recorded_at")
+        .eq("unit_number", unitNumber)
+        .eq("variable_key", p.key)
+        .order("recorded_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (last && last.value != null) {
+        row[p.col] = p.str ? String(last.value) : (last.value as number);
+        tsMs.push(new Date(last.recorded_at).getTime());
+      }
+      // else: leave column out → existing value preserved (no clobber).
+    }
+  }
+
+  // Location only if Anedya returned it; otherwise omit (preserve prior).
+  if (location.isSuccess && location.data) {
+    row.latitude = (location.data as Record<string, number>).lat;
+    row.longitude = (location.data as Record<string, number>).long;
+  }
+
+  if (tsMs.length) {
+    const newest = Math.max(...tsMs);
+    row.last_data_at = new Date(newest).toISOString();
+    // Online: trust Anedya status when we have it; otherwise derive from
+    // data freshness (reported within the last 30 min).
+    row.online =
+      typeof status === "boolean"
+        ? status
+        : Date.now() - newest < 30 * 60_000;
+  } else if (typeof status === "boolean") {
+    row.online = status;
+  }
+
+  await supabase
+    .from("unit_snapshots")
+    .upsert(row, { onConflict: "unit_number" });
 }
 
 // ─── Bounded concurrency pool ────────────────────────────────────────────────
