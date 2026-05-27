@@ -116,7 +116,12 @@ export async function getHistoricalDataFromSupabase(
     }));
   }
 
-  // Raw data for short ranges
+  // Raw data for short ranges.
+  // Order DESCENDING + limit 10k = take the NEWEST 10k points within the
+  // window when a chatty variable overflows the cap. (Ascending-then-limit
+  // silently dropped the most recent readings, making fast-changing
+  // variables like Battery SoC look stuck at an old timestamp.) Reverse
+  // client-side so the chart still gets ascending order.
   const { data, error } = await supabase
     .from("sensor_readings")
     .select("recorded_at, value")
@@ -124,7 +129,7 @@ export async function getHistoricalDataFromSupabase(
     .eq("variable_key", variableKey)
     .gte("recorded_at", fromDate)
     .lte("recorded_at", toDate)
-    .order("recorded_at", { ascending: true })
+    .order("recorded_at", { ascending: false })
     .limit(10000);
 
   if (error || !data) {
@@ -132,10 +137,13 @@ export async function getHistoricalDataFromSupabase(
     return [];
   }
 
-  return data.map((row: any) => ({
-    datetime: row.recorded_at,
-    value: row.value,
-  }));
+  return data
+    .slice()
+    .reverse()
+    .map((row: any) => ({
+      datetime: row.recorded_at,
+      value: row.value,
+    }));
 }
 
 // ─── All historical data for a unit (for CSV/PDF exports) ────────────────────
