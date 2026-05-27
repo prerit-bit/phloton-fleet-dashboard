@@ -82,23 +82,39 @@ export async function getUnitSnapshotFromSupabase(
  * For ranges > 7 days, uses the hourly aggregation view for performance.
  * For shorter ranges, returns raw data points.
  */
+/** Bucket granularity for chart fetches. */
+export type Bucket = "raw" | "5min" | "hourly";
+
+/**
+ * Chart-friendly point. Aggregated buckets also carry min/max so the
+ * chart can shade an envelope band that surfaces spikes the average
+ * would otherwise hide (important for cold-chain excursion visibility).
+ */
+export type ChartPoint = {
+  datetime: string;
+  value: number;
+  min?: number;
+  max?: number;
+};
+
 export async function getHistoricalDataFromSupabase(
   unitNumber: number,
   variableKey: string,
   fromTime: number, // Unix seconds
   toTime: number,   // Unix seconds
-  useAggregation: boolean = false
-): Promise<HistoricalPoint[]> {
+  bucket: Bucket = "raw"
+): Promise<ChartPoint[]> {
   const fromDate = new Date(fromTime * 1000).toISOString();
   const toDate = new Date(toTime * 1000).toISOString();
 
   if (!supabase) return [];
 
-  if (useAggregation) {
-    // Use hourly aggregation view for long ranges
+  if (bucket !== "raw") {
+    const view =
+      bucket === "5min" ? "sensor_readings_5min" : "sensor_readings_hourly";
     const { data, error } = await supabase
-      .from("sensor_readings_hourly")
-      .select("bucket, avg_value")
+      .from(view)
+      .select("bucket, avg_value, min_value, max_value")
       .eq("unit_number", unitNumber)
       .eq("variable_key", variableKey)
       .gte("bucket", fromDate)
@@ -106,13 +122,15 @@ export async function getHistoricalDataFromSupabase(
       .order("bucket", { ascending: true });
 
     if (error || !data) {
-      console.error("Supabase aggregated data error:", error);
+      console.error(`Supabase ${bucket} data error:`, error);
       return [];
     }
 
     return data.map((row: any) => ({
       datetime: row.bucket,
       value: row.avg_value,
+      min: row.min_value,
+      max: row.max_value,
     }));
   }
 

@@ -11,6 +11,8 @@ import {
   getUnitSnapshotFromSupabase,
   getHistoricalDataFromSupabase,
   getAllHistoricalDataFromSupabase,
+  type Bucket,
+  type ChartPoint,
 } from "@/lib/supabase-data";
 import { buildCsvFromHistory, downloadFile, generateUnitReport } from "@/lib/export";
 import {
@@ -91,7 +93,7 @@ function formatTooltipTime(iso: string): string {
 }
 
 // Determine a reasonable filter for sensor errors per variable
-function filterSensorErrors(points: HistoricalPoint[], varName: string): HistoricalPoint[] {
+function filterSensorErrors<T extends { value: number }>(points: T[], varName: string): T[] {
   const name = varName.toLowerCase();
   // Temperature variables: filter out < -10 (aggregated averages with -273 mixed in go very negative)
   if (name.includes("temp") || name.includes("heat") || name.includes("cold") || name.includes("pcb")) {
@@ -124,7 +126,7 @@ function filterSensorErrors(points: HistoricalPoint[], varName: string): Histori
 
 function VariableChart({ name, data, timeRange, color, unitLabel, refLines, fromMs, toMs }: {
   name: string;
-  data: { ts: number; fullTime: string; value: number }[];
+  data: { ts: number; fullTime: string; value: number; band?: [number, number] | null }[];
   timeRange: TimeRange;
   color: string;
   unitLabel?: string;
@@ -132,6 +134,9 @@ function VariableChart({ name, data, timeRange, color, unitLabel, refLines, from
   fromMs: number;
   toMs: number;
 }) {
+  // Render the min/max envelope only if at least one point carries it
+  // (i.e. aggregated buckets — raw data has no band).
+  const showBand = data.some((d) => Array.isArray(d.band));
   const needsAngle = timeRange === "7d" || timeRange === "30d" || timeRange === "all";
   const gradientId = `grad-${name.replace(/\s+/g, "-")}`;
 
@@ -189,6 +194,17 @@ function VariableChart({ name, data, timeRange, color, unitLabel, refLines, from
               <ReferenceLine key={i} y={rl.y} stroke={rl.color} strokeDasharray="6 3" strokeWidth={1}
                 label={{ value: rl.label, position: "left", fontSize: 9, fill: rl.color }} />
             ))}
+            {showBand && (
+              <Area
+                type="monotone"
+                dataKey="band"
+                stroke="none"
+                fill={color}
+                fillOpacity={0.12}
+                isAnimationActive={false}
+                activeDot={false}
+              />
+            )}
             <Area type="monotone" dataKey="value" stroke={color} fill={`url(#${gradientId})`}
               strokeWidth={1.5} dot={false}
               activeDot={{ r: 4, stroke: color, strokeWidth: 2, fill: "white" }} />
@@ -255,7 +271,7 @@ export default function UnitDetailPage() {
 
   // Variable selection & data
   const [selectedVars, setSelectedVars] = useState<string[]>(DEFAULT_SELECTED);
-  const [varData, setVarData] = useState<Record<string, HistoricalPoint[]>>({});
+  const [varData, setVarData] = useState<Record<string, ChartPoint[]>>({});
   const [chartLoading, setChartLoading] = useState(false);
   const [loadingProgress, setLoadingProgress] = useState("");
   const [showVarPicker, setShowVarPicker] = useState(false);
@@ -277,52 +293,56 @@ export default function UnitDetailPage() {
     }
   }, [unitNumber]);
 
-  // Fetch chart data for selected variables
+  // Fetch chart data for selected variables (parallel)
   const fetchChartData = useCallback(async () => {
     setChartLoading(true);
-    setLoadingProgress("");
+    setLoadingProgress(
+      selectedVars.length > 1
+        ? `Loading ${selectedVars.length} variables…`
+        : "Loading…"
+    );
     try {
       const now = Math.floor(Date.now() / 1000);
       const fromTime = now - RANGE_SECONDS[timeRange];
-      // Raw points only for 1h (rarely exceeds the 10k cap). Anything
-      // wider uses the hourly aggregation view — otherwise chatty
-      // variables (Battery SoC, Battery Current) silently truncate the
-      // window to the newest ~1-2 h of dense raw data.
-      const useHourlyAgg = timeRange !== "1h";
+      // Adaptive bucket: raw for 1h; 5-min for 6h/24h (72 / 288 buckets);
+      // hourly for 7d+ (168 / 720). Aggregated buckets also carry min/max
+      // so the chart can render an envelope band that surfaces spikes.
+      const bucket: Bucket =
+        timeRange === "1h"
+          ? "raw"
+          : timeRange === "6h" || timeRange === "24h"
+            ? "5min"
+            : "hourly";
 
-      const results: { name: string; data: HistoricalPoint[] }[] = [];
+      // Parallel fetch — was sequential per-variable, multiplying latency.
+      const results = await Promise.all(
+        selectedVars.map(async (varName) => {
+          const varConfig = AVAILABLE_VARS.find((v) => v.name === varName);
+          if (!varConfig) return { name: varName, data: [] as ChartPoint[] };
 
-      // Supabase only: a single RLS-scoped query per variable. The direct
-      // Anedya path is intentionally removed — it would bypass RLS.
-      for (let vi = 0; vi < selectedVars.length; vi++) {
-        const varName = selectedVars[vi];
-        setLoadingProgress(`${varName} (${vi + 1}/${selectedVars.length})`);
-        const varConfig = AVAILABLE_VARS.find((v) => v.name === varName);
-        if (!varConfig) { results.push({ name: varName, data: [] }); continue; }
-
-        let data = await getHistoricalDataFromSupabase(
-          unitNumber, varConfig.key, fromTime, now, useHourlyAgg
-        );
-        data = filterSensorErrors(data, varName);
-
-        // Downsample if needed — but ALWAYS preserve the first and last
-        // points so the chart's "latest value" reflects the freshest raw
-        // reading (otherwise a different stride per range made 6h and
-        // 24h look like they had different last values).
-        if (data.length > 4000) {
-          const step = Math.ceil(data.length / 4000);
-          const lastIdx = data.length - 1;
-          data = data.filter(
-            (_, i) => i % step === 0 || i === lastIdx
+          let data = await getHistoricalDataFromSupabase(
+            unitNumber,
+            varConfig.key,
+            fromTime,
+            now,
+            bucket
           );
-        }
-        results.push({ name: varName, data });
-      }
+          data = filterSensorErrors(data, varName) as ChartPoint[];
 
-      const newData: Record<string, HistoricalPoint[]> = {};
-      for (const r of results) {
-        newData[r.name] = r.data;
-      }
+          // Downsample if needed, but always preserve the latest point.
+          if (data.length > 4000) {
+            const step = Math.ceil(data.length / 4000);
+            const lastIdx = data.length - 1;
+            data = data.filter(
+              (_, i) => i % step === 0 || i === lastIdx
+            );
+          }
+          return { name: varName, data };
+        })
+      );
+
+      const newData: Record<string, ChartPoint[]> = {};
+      for (const r of results) newData[r.name] = r.data;
       setVarData(newData);
     } catch (err) {
       console.error("Failed to fetch chart data:", err);
@@ -569,6 +589,10 @@ export default function UnitDetailPage() {
               ts: new Date(p.datetime).getTime(),
               fullTime: formatTooltipTime(p.datetime),
               value: p.value,
+              band:
+                typeof p.min === "number" && typeof p.max === "number"
+                  ? ([p.min, p.max] as [number, number])
+                  : null,
             }));
             const varIdx = AVAILABLE_VARS.findIndex((v) => v.name === varName);
             const color = CHART_COLORS[(varIdx >= 0 ? varIdx : idx) % CHART_COLORS.length];
