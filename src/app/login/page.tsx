@@ -14,6 +14,34 @@ function LoginForm() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [sentNotice, setSentNotice] = useState<string | null>(null);
+
+  async function handleForgot() {
+    setError(null);
+    setSentNotice(null);
+    const addr = email.trim();
+    if (!addr) {
+      setError("Type your email above first, then click ‘Forgot password’.");
+      return;
+    }
+    setSending(true);
+    const origin =
+      typeof window !== "undefined"
+        ? window.location.origin
+        : "https://app.phloton.com";
+    const { error } = await supabase.auth.resetPasswordForEmail(addr, {
+      redirectTo: `${origin}/reset-password`,
+    });
+    setSending(false);
+    if (error) {
+      setError(error.message);
+      return;
+    }
+    setSentNotice(
+      `If an account exists for ${addr}, a reset link has been sent. Check your email.`
+    );
+  }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -81,12 +109,22 @@ function LoginForm() {
           </div>
 
           <div>
-            <label
-              htmlFor="password"
-              className="mb-1.5 block text-sm font-medium text-navy-800"
-            >
-              Password
-            </label>
+            <div className="mb-1.5 flex items-center justify-between">
+              <label
+                htmlFor="password"
+                className="block text-sm font-medium text-navy-800"
+              >
+                Password
+              </label>
+              <button
+                type="button"
+                onClick={handleForgot}
+                disabled={sending}
+                className="text-xs font-medium text-teal-600 transition hover:underline disabled:opacity-60"
+              >
+                {sending ? "Sending…" : "Forgot password?"}
+              </button>
+            </div>
             <div className="relative">
               <Lock className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-navy-200" />
               <input
@@ -105,6 +143,11 @@ function LoginForm() {
           {error && (
             <p className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-600">
               {error}
+            </p>
+          )}
+          {sentNotice && (
+            <p className="rounded-lg bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
+              {sentNotice}
             </p>
           )}
 

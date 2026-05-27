@@ -1,7 +1,13 @@
 import type { Metadata } from "next";
+import { headers } from "next/headers";
 import "./globals.css";
 import { createServerSupabase } from "@/lib/supabase/server";
 import UserMenu from "@/components/UserMenu";
+
+// Pages that should render bare (no app chrome) regardless of session
+// — login + password-recovery (a recovery session is authenticated but
+// the user must stay on /reset-password to set a new password).
+const BARE_PATHS = new Set<string>(["/login", "/reset-password"]);
 
 export const metadata: Metadata = {
   title: "Phloton Dashboard",
@@ -18,6 +24,9 @@ export default async function RootLayout({
     data: { user },
   } = await supabase.auth.getUser();
 
+  const pathname = headers().get("x-phloton-pathname") ?? "";
+  const showChrome = !!user && !BARE_PATHS.has(pathname);
+
   return (
     <html lang="en">
       <head>
@@ -28,7 +37,7 @@ export default async function RootLayout({
         />
       </head>
       <body className="min-h-screen bg-navy-50 antialiased">
-        {user ? (
+        {showChrome ? (
           <>
             {/* Top nav (signed-in) */}
             <nav className="sticky top-0 z-50 border-b border-navy-100 bg-white/80 backdrop-blur-md">
@@ -42,7 +51,7 @@ export default async function RootLayout({
                     <span className="font-normal text-navy-200">Dashboard</span>
                   </span>
                 </a>
-                <UserMenu email={user.email ?? ""} />
+                <UserMenu email={user?.email ?? ""} />
               </div>
             </nav>
             <main className="mx-auto max-w-7xl px-4 py-6 sm:px-6">
