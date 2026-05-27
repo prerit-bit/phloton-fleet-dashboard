@@ -122,13 +122,15 @@ function filterSensorErrors(points: HistoricalPoint[], varName: string): Histori
 
 // ─── Variable chart component ─────────────────────────────────────────────────
 
-function VariableChart({ name, data, timeRange, color, unitLabel, refLines }: {
+function VariableChart({ name, data, timeRange, color, unitLabel, refLines, fromMs, toMs }: {
   name: string;
-  data: { time: string; fullTime: string; value: number }[];
+  data: { ts: number; fullTime: string; value: number }[];
   timeRange: TimeRange;
   color: string;
   unitLabel?: string;
   refLines?: { y: number; label: string; color: string }[];
+  fromMs: number;
+  toMs: number;
 }) {
   const needsAngle = timeRange === "7d" || timeRange === "30d" || timeRange === "all";
   const gradientId = `grad-${name.replace(/\s+/g, "-")}`;
@@ -153,7 +155,14 @@ function VariableChart({ name, data, timeRange, color, unitLabel, refLines }: {
             </defs>
             <CartesianGrid strokeDasharray="3 3" stroke="#E5E7EB" />
             <XAxis
-              dataKey="time" tick={{ fontSize: 9, fill: "#6B7280" }}
+              dataKey="ts"
+              type="number"
+              scale="time"
+              domain={[fromMs, toMs]}
+              tickFormatter={(v: number) =>
+                formatChartTime(new Date(v).toISOString(), timeRange)
+              }
+              tick={{ fontSize: 9, fill: "#6B7280" }}
               interval="preserveStartEnd"
               angle={needsAngle ? -35 : 0}
               textAnchor={needsAngle ? "end" : "middle"}
@@ -557,7 +566,7 @@ export default function UnitDetailPage() {
           {selectedVars.map((varName, idx) => {
             const points = varData[varName] || [];
             const chartData = points.map((p) => ({
-              time: formatChartTime(p.datetime, timeRange),
+              ts: new Date(p.datetime).getTime(),
               fullTime: formatTooltipTime(p.datetime),
               value: p.value,
             }));
@@ -573,6 +582,8 @@ export default function UnitDetailPage() {
                 color={color}
                 unitLabel={VAR_UNITS[varName]}
                 refLines={VAR_REFLINES[varName]}
+                fromMs={(Math.floor(Date.now() / 1000) - RANGE_SECONDS[timeRange]) * 1000}
+                toMs={Date.now()}
               />
             );
           })}
