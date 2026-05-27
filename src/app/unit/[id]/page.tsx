@@ -292,10 +292,16 @@ export default function UnitDetailPage() {
         );
         data = filterSensorErrors(data, varName);
 
-        // Downsample if needed
+        // Downsample if needed — but ALWAYS preserve the first and last
+        // points so the chart's "latest value" reflects the freshest raw
+        // reading (otherwise a different stride per range made 6h and
+        // 24h look like they had different last values).
         if (data.length > 4000) {
           const step = Math.ceil(data.length / 4000);
-          data = data.filter((_, i) => i % step === 0);
+          const lastIdx = data.length - 1;
+          data = data.filter(
+            (_, i) => i % step === 0 || i === lastIdx
+          );
         }
         results.push({ name: varName, data });
       }
