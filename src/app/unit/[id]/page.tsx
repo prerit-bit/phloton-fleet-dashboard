@@ -275,7 +275,11 @@ export default function UnitDetailPage() {
     try {
       const now = Math.floor(Date.now() / 1000);
       const fromTime = now - RANGE_SECONDS[timeRange];
-      const useHourlyAgg = timeRange === "30d" || timeRange === "all";
+      // Raw points only for 1h (rarely exceeds the 10k cap). Anything
+      // wider uses the hourly aggregation view — otherwise chatty
+      // variables (Battery SoC, Battery Current) silently truncate the
+      // window to the newest ~1-2 h of dense raw data.
+      const useHourlyAgg = timeRange !== "1h";
 
       const results: { name: string; data: HistoricalPoint[] }[] = [];
 
