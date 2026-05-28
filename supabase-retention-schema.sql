@@ -76,10 +76,13 @@ $$;
 -- Service role can call the function; nothing else needs to.
 REVOKE ALL ON FUNCTION public.phloton_retention_step() FROM PUBLIC, anon, authenticated;
 
--- 2. Run it ONCE for the initial cleanup.
-SELECT * FROM public.phloton_retention_step();
-
--- 3. Reclaim disk + refresh planner stats. Must run outside a transaction;
---    the Supabase SQL editor runs each top-level statement standalone.
-VACUUM ANALYZE sensor_readings;
-VACUUM ANALYZE sync_log;
+-- (No initial cleanup here on purpose — the nightly archive workflow
+--  will call this function AFTER it has backed up the raw rows to
+--  Google Drive, preserving full-fidelity historical data. Running the
+--  function ad-hoc from the SQL editor would aggregate-and-delete raw
+--  rows that hadn't been archived yet.)
+--
+-- After the first archive workflow run completes, you can manually
+-- reclaim disk + refresh planner stats from the SQL editor:
+--   VACUUM ANALYZE sensor_readings;
+--   VACUUM ANALYZE sync_log;
