@@ -15,6 +15,7 @@ import {
   type ChartPoint,
 } from "@/lib/supabase-data";
 import { buildCsvFromHistory, downloadFile, generateUnitReport } from "@/lib/export";
+import { sanitizeChartPoints } from "@/lib/sensor-bounds";
 import {
   XAxis,
   YAxis,
@@ -92,35 +93,8 @@ function formatTooltipTime(iso: string): string {
     + "  " + d.toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
-// Determine a reasonable filter for sensor errors per variable
-function filterSensorErrors<T extends { value: number }>(points: T[], varName: string): T[] {
-  const name = varName.toLowerCase();
-  // Temperature variables: filter out < -10 (aggregated averages with -273 mixed in go very negative)
-  if (name.includes("temp") || name.includes("heat") || name.includes("cold") || name.includes("pcb")) {
-    return points.filter((p) => p.value > -10 && p.value < 120);
-  }
-  // Battery SoC: 0-100%
-  if (name.includes("soc")) {
-    return points.filter((p) => p.value >= 0 && p.value <= 100);
-  }
-  // Voltage: 0-20V
-  if (name.includes("voltage")) {
-    return points.filter((p) => p.value >= 0 && p.value <= 20);
-  }
-  // Current: filter extreme
-  if (name.includes("current")) {
-    return points.filter((p) => p.value > -10 && p.value < 10);
-  }
-  // DutyCycle: 0-4096
-  if (name.includes("duty")) {
-    return points.filter((p) => p.value >= 0 && p.value <= 5000);
-  }
-  // Status: 0 or 1
-  if (name.includes("status") && !name.includes("fault")) {
-    return points.filter((p) => p.value >= 0 && p.value <= 1);
-  }
-  return points;
-}
+// Per-variable physical bounds + envelope-band sanitiser live in
+// src/lib/sensor-bounds.ts so the sync layer applies the same rules.
 
 // ─── Variable chart component ─────────────────────────────────────────────────
 
@@ -327,7 +301,7 @@ export default function UnitDetailPage() {
             now,
             bucket
           );
-          data = filterSensorErrors(data, varName) as ChartPoint[];
+          data = sanitizeChartPoints(data, varName);
 
           // Downsample if needed, but always preserve the latest point.
           if (data.length > 4000) {

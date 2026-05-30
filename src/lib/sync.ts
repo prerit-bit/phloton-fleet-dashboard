@@ -27,6 +27,7 @@ import {
   getLatestData,
   type HistoricalPoint,
 } from "./anedya";
+import { filterValidReadings, isValidReading } from "./sensor-bounds";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -135,11 +136,16 @@ async function syncVariable(
 
   if (allPoints.length === 0) return 0;
 
+  // Drop hardware-impossible readings (sensor glitches, ADC spikes) before
+  // they pollute sensor_readings and bake themselves into the 5min/hourly
+  // aggregation views' MIN/MAX columns.
+  const cleanPoints = filterValidReadings(allPoints, variableName);
+
   // 3. Split into old (→ aggregate) and recent (→ raw)
-  const oldPoints = allPoints.filter(
+  const oldPoints = cleanPoints.filter(
     (p) => new Date(p.datetime).getTime() / 1000 < rawCutoff
   );
-  const recentPoints = allPoints.filter(
+  const recentPoints = cleanPoints.filter(
     (p) => new Date(p.datetime).getTime() / 1000 >= rawCutoff
   );
 
@@ -254,7 +260,13 @@ async function syncUnitSnapshot(unitNumber: number, nodeId: string) {
   const tsMs: number[] = [];
 
   for (const p of plan) {
-    if (p.res.isSuccess && p.res.data != null) {
+    // Drop the live reading if it's outside physical bounds (string fields
+    // like fault_status are not numeric, so they're never filtered here).
+    const liveValid =
+      p.str ||
+      (typeof p.res.data === "number" && isValidReading(p.col, p.res.data));
+
+    if (p.res.isSuccess && p.res.data != null && liveValid) {
       row[p.col] = p.str ? String(p.res.data) : (p.res.data as number);
       if (typeof p.res.timestamp === "number" && p.res.timestamp > 0)
         tsMs.push(p.res.timestamp * 1000);
@@ -268,7 +280,10 @@ async function syncUnitSnapshot(unitNumber: number, nodeId: string) {
         .order("recorded_at", { ascending: false })
         .limit(1)
         .maybeSingle();
-      if (last && last.value != null) {
+      const fallbackValid =
+        p.str ||
+        (typeof last?.value === "number" && isValidReading(p.col, last.value));
+      if (last && last.value != null && fallbackValid) {
         row[p.col] = p.str ? String(last.value) : (last.value as number);
         tsMs.push(new Date(last.recorded_at).getTime());
       }
