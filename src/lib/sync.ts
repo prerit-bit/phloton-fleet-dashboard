@@ -94,8 +94,12 @@ async function syncVariable(
   const RAW_WINDOW = 48 * 3600; // 48 hours of raw data
   const rawCutoff = now - RAW_WINDOW;
 
-  // Default: backfill 1 year on first sync
-  const lastSynced = stateRow?.last_synced_timestamp || (now - 365 * 86400);
+  // First-sync backfill window. The original 365-day default pulled ~2.7M
+  // rows across the fleet and blew through the free tier's 500MB disk
+  // (read-only lockout, June 2026). Keep it small; raise per-run with
+  // SYNC_BACKFILL_DAYS if a deeper backfill is ever genuinely needed.
+  const BACKFILL_DAYS = Math.max(1, Number(process.env.SYNC_BACKFILL_DAYS ?? 30));
+  const lastSynced = stateRow?.last_synced_timestamp || (now - BACKFILL_DAYS * 86400);
 
   // Skip if we synced very recently (within 60 seconds)
   if (now - lastSynced < 60) return 0;
