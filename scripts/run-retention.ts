@@ -21,7 +21,7 @@ import { supabaseAdmin } from "../src/lib/supabase";
 
 const gzip = promisify(gzipCb);
 const PAGE = 1000;
-const RAW_RETENTION_DAYS = 7;
+const RAW_RETENTION_DAYS = 1;
 
 function dayISO(d: Date): string {
   return d.toISOString().slice(0, 10);
@@ -57,13 +57,20 @@ async function main() {
   const cutoff = startOfUTCDay(
     new Date(Date.now() - RAW_RETENTION_DAYS * 86_400_000)
   );
-  const { data: oldest } = await sb
+  // NOTE errors here MUST throw. In July 2026 this probe was timing out
+  // (no index led on recorded_at), the error was silently discarded, and
+  // "no data" was read as "nothing to archive" — retention no-opped green
+  // for weeks while raw rows filled the disk quota.
+  const { data: oldest, error: oldestErr } = await sb
     .from("sensor_readings")
     .select("recorded_at")
     .lt("recorded_at", cutoff.toISOString())
     .order("recorded_at", { ascending: true })
     .limit(1)
     .maybeSingle();
+  if (oldestErr) {
+    throw new Error(`oldest-row probe failed: ${oldestErr.message}`);
+  }
 
   if (!oldest) {
     console.log("Nothing older than 7 days to archive.");

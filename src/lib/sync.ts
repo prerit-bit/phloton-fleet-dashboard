@@ -91,7 +91,10 @@ async function syncVariable(
     .single();
 
   const now = Math.floor(Date.now() / 1000);
-  const RAW_WINDOW = 48 * 3600; // 48 hours of raw data
+  const RAW_WINDOW = 6 * 3600; // raw kept 6h only — dashboards chart 5min/hourly
+  // beyond that, and Tier-1 analytics pulls raw from Anedya directly. The old
+  // 48h window let ~330k raw rows/day/active-unit pile up and (with the
+  // silently-failing retention job) blew the free-tier disk quota July 2026.
   const rawCutoff = now - RAW_WINDOW;
 
   // First-sync backfill window. The original 365-day default pulled ~2.7M
