@@ -4,12 +4,25 @@
  * Fleet Health — daily device-health scores from the physics-anchored
  * statistical model (health/ pipeline). Reads the 29-row unit_health table;
  * RLS scopes customers to their own units, admins see the fleet.
+ *
+ * Charts render the evidence behind each flag: the indicator's own history,
+ * the unit's baseline, the alarm threshold, and the day drift was detected.
  */
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { supabase } from "@/lib/supabase/client";
+import {
+  Bar, BarChart, Cell, Line, LineChart, ReferenceLine,
+  ResponsiveContainer, Tooltip, XAxis, YAxis, CartesianGrid,
+} from "recharts";
 
 type Concern = { severity: "high" | "medium" | "low"; text: string };
+type SeriesSpec = {
+  label: string; unit: string;
+  points: { d: string; v: number }[];
+  baseline: number | null; threshold: number | null;
+  direction: number | null; flagged_on: string | null;
+};
 type HealthRow = {
   unit_number: number;
   health_score: number | null;
@@ -18,17 +31,21 @@ type HealthRow = {
   last_data_day: string | null;
   active_days: number | null;
   concerns: Concern[];
-  indicators: Record<string, any>;
+  indicators: {
+    fleet_z?: Record<string, number>;
+    runways?: Record<string, { days_to_threshold: number; slope_per_day: number }>;
+    series?: Record<string, SeriesSpec>;
+    [k: string]: any;
+  };
 };
 
-const STATUS_META: Record<HealthRow["status"], { label: string; pill: string; dot: string }> = {
-  ok:       { label: "Nominal",       pill: "bg-emerald-50 text-emerald-700 border-emerald-200", dot: "bg-emerald-500" },
-  watch:    { label: "Watch",         pill: "bg-amber-50 text-amber-700 border-amber-200",       dot: "bg-amber-500" },
-  degraded: { label: "Degraded",      pill: "bg-orange-50 text-orange-700 border-orange-200",    dot: "bg-orange-500" },
-  action:   { label: "Action needed", pill: "bg-red-50 text-red-700 border-red-200",             dot: "bg-red-500" },
-  no_data:  { label: "No data",       pill: "bg-gray-50 text-gray-500 border-gray-200",          dot: "bg-gray-400" },
+const STATUS_META: Record<HealthRow["status"], { label: string; pill: string; dot: string; bar: string }> = {
+  ok:       { label: "Nominal",       pill: "bg-emerald-50 text-emerald-700 border-emerald-200", dot: "bg-emerald-500", bar: "#10B981" },
+  watch:    { label: "Watch",         pill: "bg-amber-50 text-amber-700 border-amber-200",       dot: "bg-amber-500",   bar: "#F59E0B" },
+  degraded: { label: "Degraded",      pill: "bg-orange-50 text-orange-700 border-orange-200",    dot: "bg-orange-500",  bar: "#F97316" },
+  action:   { label: "Action needed", pill: "bg-red-50 text-red-700 border-red-200",             dot: "bg-red-500",     bar: "#EF4444" },
+  no_data:  { label: "No data",       pill: "bg-gray-50 text-gray-500 border-gray-200",          dot: "bg-gray-400",    bar: "#9CA3AF" },
 };
-
 const SEV_DOT: Record<Concern["severity"], string> = {
   high: "bg-red-500", medium: "bg-amber-500", low: "bg-gray-400",
 };
@@ -57,24 +74,111 @@ function scoreColor(s: number | null): string {
   if (s >= 50) return "text-orange-600";
   return "text-red-600";
 }
+const shortDate = (d: string) =>
+  new Date(d + "T00:00:00Z").toLocaleDateString("en-IN", { day: "2-digit", month: "short", timeZone: "UTC" });
+
+/** Which indicators carry the story for this unit — flagged, trending, or off-norm. */
+function chartedIndicators(r: HealthRow): [string, SeriesSpec][] {
+  const series = r.indicators?.series ?? {};
+  const z = r.indicators?.fleet_z ?? {};
+  const runways = r.indicators?.runways ?? {};
+  const scored = Object.entries(series).map(([k, s]) => {
+    let w = 0;
+    if (runways[k]) w += 100 - Math.min(runways[k].days_to_threshold, 99);
+    if (s.flagged_on) w += 40;
+    const zz = z[k];
+    if (zz !== undefined) w += Math.min(Math.abs(zz), 6) * 10;
+    return { k, s, w };
+  });
+  return scored.filter((x) => x.w > 0).sort((a, b) => b.w - a.w).slice(0, 4)
+    .map((x) => [x.k, x.s] as [string, SeriesSpec]);
+}
+
+function IndicatorChart({ spec }: { spec: SeriesSpec }) {
+  const vals = spec.points.map((p) => p.v);
+  const lo = Math.min(...vals), hi = Math.max(...vals);
+  const pad = Math.max((hi - lo) * 0.25, Math.abs(hi || 1) * 0.05, 0.05);
+  let dMin = lo - pad, dMax = hi + pad;
+
+  // Only draw the alarm line if it sits near the data — otherwise it would
+  // flatten the very drift we're trying to show. Named in the caption instead.
+  const thr = spec.threshold;
+  const thrInView =
+    thr !== null && thr !== undefined && thr >= dMin - (dMax - dMin) && thr <= dMax + (dMax - dMin);
+  if (thrInView && thr !== null && thr !== undefined) {
+    dMin = Math.min(dMin, thr - pad); dMax = Math.max(dMax, thr + pad);
+  }
+  const base = spec.baseline;
+  const data = spec.points.map((p) => ({ ...p, label: shortDate(p.d) }));
+
+  return (
+    <div className="rounded-lg border border-navy-100 p-3">
+      <div className="mb-1 flex items-baseline justify-between gap-2">
+        <span className="text-xs font-semibold text-navy-800">{spec.label}</span>
+        <span className="text-[10px] text-navy-200">
+          {vals[vals.length - 1].toFixed(2)}{spec.unit ? ` ${spec.unit}` : ""}
+        </span>
+      </div>
+      <ResponsiveContainer width="100%" height={130}>
+        <LineChart data={data} margin={{ top: 4, right: 8, left: -18, bottom: 0 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
+          <XAxis dataKey="label" tick={{ fontSize: 9, fill: "#94A3B8" }} interval="preserveStartEnd" minTickGap={24} />
+          <YAxis domain={[dMin, dMax]} tick={{ fontSize: 9, fill: "#94A3B8" }} width={38}
+            tickFormatter={(v: number) => (Math.abs(v) >= 100 ? v.toFixed(0) : v.toFixed(2))} />
+          <Tooltip
+            contentStyle={{ fontSize: 11, borderRadius: 8, border: "1px solid #E2E8F0" }}
+            formatter={(v: any) => [`${Number(v).toFixed(3)}${spec.unit ? ` ${spec.unit}` : ""}`, spec.label]}
+          />
+          {base !== null && base !== undefined && (
+            <ReferenceLine y={base} stroke="#64748B" strokeDasharray="4 3" strokeWidth={1}
+              label={{ value: "baseline", position: "insideTopLeft", fontSize: 8, fill: "#64748B" }} />
+          )}
+          {thrInView && (
+            <ReferenceLine y={thr as number} stroke="#EF4444" strokeDasharray="5 3" strokeWidth={1}
+              label={{ value: "alarm", position: "insideTopRight", fontSize: 8, fill: "#EF4444" }} />
+          )}
+          {spec.flagged_on && (
+            <ReferenceLine x={shortDate(spec.flagged_on)} stroke="#F59E0B" strokeDasharray="3 3" strokeWidth={1}
+              label={{ value: "drift", position: "top", fontSize: 8, fill: "#F59E0B" }} />
+          )}
+          <Line type="monotone" dataKey="v" stroke="#0EA5E9" strokeWidth={1.8} dot={{ r: 1.5 }} isAnimationActive={false} />
+        </LineChart>
+      </ResponsiveContainer>
+      {!thrInView && thr !== null && thr !== undefined && (
+        <p className="mt-1 text-[10px] text-navy-200">Alarm level {thr}{spec.unit ? ` ${spec.unit}` : ""} — off-chart</p>
+      )}
+    </div>
+  );
+}
 
 export default function HealthPage() {
   const [rows, setRows] = useState<HealthRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [open, setOpen] = useState<Record<number, boolean>>({});
 
   useEffect(() => {
     (async () => {
       if (!supabase) { setError("client unavailable"); return; }
       const { data, error } = await supabase
-        .from("unit_health")
-        .select("*")
-        .order("health_score", { ascending: true });
+        .from("unit_health").select("*").order("health_score", { ascending: true });
       if (error) setError(error.message);
-      else setRows((data ?? []) as HealthRow[]);
+      else {
+        const rs = (data ?? []) as HealthRow[];
+        setRows(rs);
+        // charts expanded by default for anything that needs attention
+        const o: Record<number, boolean> = {};
+        rs.forEach((r) => { if (r.status === "action" || r.status === "degraded") o[r.unit_number] = true; });
+        setOpen(o);
+      }
     })();
   }, []);
 
   const computedAt = rows?.[0]?.computed_at;
+  const scored = (rows ?? []).filter((r) => r.health_score !== null);
+  const fleetData = scored.map((r) => ({
+    unit: `U${r.unit_number}`, score: r.health_score as number,
+    fill: STATUS_META[r.status]?.bar ?? "#9CA3AF",
+  }));
 
   return (
     <main className="mx-auto max-w-5xl px-4 py-8">
@@ -90,6 +194,36 @@ export default function HealthPage() {
           ← Fleet overview
         </Link>
       </div>
+
+      {/* Fleet ranking chart */}
+      {fleetData.length > 0 && (
+        <section className="mb-6 rounded-2xl border border-navy-100 bg-white p-6 shadow-sm">
+          <h2 className="text-sm font-bold uppercase tracking-wide text-navy-200">Fleet health ranking</h2>
+          <p className="mt-1 text-xs text-navy-200">
+            Lowest scores first — bar colour is the action tier. Units with no telemetry in the window are not scored.
+          </p>
+          <div className="mt-4">
+            <ResponsiveContainer width="100%" height={220}>
+              <BarChart data={fleetData} margin={{ top: 4, right: 8, left: -18, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" vertical={false} />
+                <XAxis dataKey="unit" tick={{ fontSize: 10, fill: "#64748B" }} />
+                <YAxis domain={[0, 100]} tick={{ fontSize: 10, fill: "#94A3B8" }} width={38} />
+                <Tooltip cursor={{ fill: "#F8FAFC" }} contentStyle={{ fontSize: 11, borderRadius: 8, border: "1px solid #E2E8F0" }}
+                  formatter={(v: any) => [`${v} / 100`, "Health score"]} />
+                <ReferenceLine y={85} stroke="#10B981" strokeDasharray="4 3" strokeWidth={1}
+                  label={{ value: "nominal", position: "right", fontSize: 8, fill: "#10B981" }} />
+                <ReferenceLine y={70} stroke="#F59E0B" strokeDasharray="4 3" strokeWidth={1}
+                  label={{ value: "watch", position: "right", fontSize: 8, fill: "#F59E0B" }} />
+                <ReferenceLine y={50} stroke="#EF4444" strokeDasharray="4 3" strokeWidth={1}
+                  label={{ value: "action", position: "right", fontSize: 8, fill: "#EF4444" }} />
+                <Bar dataKey="score" radius={[4, 4, 0, 0]}>
+                  {fleetData.map((d, i) => <Cell key={i} fill={d.fill} />)}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </section>
+      )}
 
       {/* What the score signifies */}
       <section className="mb-6 rounded-2xl border border-navy-100 bg-white p-6 shadow-sm">
@@ -117,7 +251,7 @@ export default function HealthPage() {
         <h2 className="text-sm font-bold uppercase tracking-wide text-navy-200">How we measure it</h2>
         <p className="mt-2 text-sm text-navy-800">
           Seven physical health indicators are computed for every unit, every day, from its raw telemetry. Each is
-          watched three ways: drift against the unit's <em>own</em> historical baseline, deviation from the
+          watched three ways: drift against the unit&apos;s <em>own</em> historical baseline, deviation from the
           <em> fleet</em> norm, and its trend extrapolated to an alarm level. In backtesting over six months of fleet
           history, this approach flagged both units that later went permanently offline — 24 days and 4 days in
           advance — and independently rediscovered every known hardware defect in the fleet.
@@ -135,15 +269,23 @@ export default function HealthPage() {
 
       {/* Per-unit health */}
       <section>
-        <h2 className="mb-3 text-sm font-bold uppercase tracking-wide text-navy-200">Units — points of concern</h2>
+        <h2 className="mb-1 text-sm font-bold uppercase tracking-wide text-navy-200">Units — points of concern</h2>
+        <p className="mb-3 text-xs text-navy-200">
+          Charts show the evidence: the indicator&apos;s own history, the unit&apos;s{" "}
+          <span className="font-medium text-navy-800">baseline</span> (grey),
+          the <span className="font-medium text-red-600">alarm level</span> (red), and the day{" "}
+          <span className="font-medium text-amber-600">drift</span> was first detected.
+        </p>
         {error && <p className="text-sm text-red-600">Failed to load health data: {error}</p>}
         {!rows && !error && <p className="text-sm text-navy-200">Loading…</p>}
         {rows && rows.length === 0 && (
-          <p className="text-sm text-navy-200">The health engine hasn't published yet — first run lands after the next daily job.</p>
+          <p className="text-sm text-navy-200">The health engine hasn&apos;t published yet — first run lands after the next daily job.</p>
         )}
         <div className="grid gap-3">
           {rows?.map((r) => {
             const meta = STATUS_META[r.status] ?? STATUS_META.no_data;
+            const charts = chartedIndicators(r);
+            const isOpen = !!open[r.unit_number];
             return (
               <div key={r.unit_number} className="rounded-xl border border-navy-100 bg-white p-4 shadow-sm">
                 <div className="flex flex-wrap items-center gap-3">
@@ -171,6 +313,22 @@ export default function HealthPage() {
                 ) : r.status !== "no_data" ? (
                   <p className="mt-3 text-sm text-emerald-700">No concerns detected — all indicators on fleet norm.</p>
                 ) : null}
+
+                {charts.length > 0 && (
+                  <>
+                    <button
+                      onClick={() => setOpen((p) => ({ ...p, [r.unit_number]: !isOpen }))}
+                      className="mt-3 text-xs font-medium text-teal-600 hover:underline"
+                    >
+                      {isOpen ? "Hide evidence charts" : `Show evidence charts (${charts.length})`}
+                    </button>
+                    {isOpen && (
+                      <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                        {charts.map(([k, spec]) => <IndicatorChart key={k} spec={spec} />)}
+                      </div>
+                    )}
+                  </>
+                )}
               </div>
             );
           })}

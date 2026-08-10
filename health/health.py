@@ -305,6 +305,38 @@ VAR_FRIENDLY = {"flask": "flask temperature", "ibatt": "battery current",
                 "soc": "battery SoC", "duty": "TEC duty"}
 
 
+
+SERIES_DAYS = 45  # rolling window shipped to the dashboard for charts —
+                  # bounded by design so unit_health can never grow unbounded
+
+
+def _series_for(unit: int) -> dict:
+    """Trailing HI series + baseline/threshold/flag-date, for the charts."""
+    path = HEALTH_DIR / f"his_u{unit}.csv"
+    if not path.exists():
+        return {}
+    hist = pd.read_csv(path).set_index("day").sort_index()
+    out = {}
+    for hi in KEY_HIS:
+        if hi not in hist.columns:
+            continue
+        s = pd.to_numeric(hist[hi], errors="coerce").dropna().tail(SERIES_DAYS)
+        if len(s) < 3:
+            continue
+        spec = RUNWAY.get(hi, {})
+        dr = ewma_drift(s)
+        out[hi] = {
+            "label": FRIENDLY.get(hi, (hi, "", 1))[0],
+            "unit": FRIENDLY.get(hi, ("", "", 1))[1],
+            "points": [{"d": str(d), "v": round(float(v), 4)} for d, v in s.items()],
+            "baseline": dr.get("baseline"),
+            "threshold": spec.get("thr"),
+            "direction": spec.get("dir"),
+            "flagged_on": dr.get("first_flag"),
+        }
+    return out
+
+
 def _concerns(d: dict) -> list:
     out = []
     for hi, rw in (d.get("runways") or {}).items():
@@ -385,6 +417,7 @@ def publish():
                     ind[k] = round(float(v), 4)
         ind["fleet_z"] = d.get("fleet_z", {})
         ind["runways"] = d.get("runways", {})
+        ind["series"] = _series_for(unit)
         rows.append({
             "unit_number": unit,
             "health_score": score,
