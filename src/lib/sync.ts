@@ -1,17 +1,12 @@
 /**
- * Anedya → Supabase Sync Service (Smart Aggregation)
+ * Anedya → Supabase Sync Service — snapshots only.
  *
- * Storage strategy to fit within Supabase free tier (500MB):
- *   - Data older than 48 hours → stored as HOURLY AVERAGES
- *   - Data from last 48 hours → stored as RAW points (full resolution)
- *
- * This cuts storage by ~60x while keeping charts looking great.
- * Hourly resolution is more than enough for lifetime/monthly views.
- * Raw data gives you full detail for recent zoomed-in views.
- *
- * Estimated storage:
- *   29 units × 19 vars × 8,760 hours/year × ~120 bytes = ~580K rows ≈ 70MB
- *   + 48hrs raw data ≈ 10MB → Total ~80MB, well within 500MB limit.
+ * History no longer lives in Supabase at all: charts and exports read
+ * Anedya directly through /api/telemetry (Aug 2026). This job now keeps
+ * only unit_snapshots fresh (fleet cards, gauges, alerts, bot) plus the
+ * disk-size guard. The per-variable historical sync — the code whose
+ * growth bricked two free-tier projects — is gone; sensor_readings gets
+ * dropped entirely once the Anedya-direct path finishes burn-in.
  */
 
 import { supabaseAdmin } from "./supabase";
@@ -22,12 +17,10 @@ import {
   getUnitNumbers,
   getNodeId,
   getAllVariables,
-  getHistoricalData,
   getDeviceStatus,
   getLatestData,
-  type HistoricalPoint,
 } from "./anedya";
-import { filterValidReadings, isValidReading } from "./sensor-bounds";
+import { isValidReading } from "./sensor-bounds";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -36,193 +29,6 @@ interface SyncResult {
   totalPointsSynced: number;
   errors: string[];
   duration: number;
-}
-
-// ─── Aggregation helper ─────────────────────────────────────────────────────
-
-/**
- * Groups raw data points into hourly buckets and averages the values.
- * E.g., 60 one-minute readings → 1 hourly average.
- */
-function aggregateToHourly(points: HistoricalPoint[]): HistoricalPoint[] {
-  const buckets = new Map<string, { sum: number; count: number }>();
-
-  for (const p of points) {
-    const d = new Date(p.datetime);
-    // Truncate to hour
-    const bucketKey = new Date(
-      d.getFullYear(), d.getMonth(), d.getDate(), d.getHours()
-    ).toISOString();
-
-    const existing = buckets.get(bucketKey);
-    if (existing) {
-      existing.sum += p.value;
-      existing.count++;
-    } else {
-      buckets.set(bucketKey, { sum: p.value, count: 1 });
-    }
-  }
-
-  const result: HistoricalPoint[] = [];
-  buckets.forEach(({ sum, count }, datetime) => {
-    result.push({ datetime, value: sum / count });
-  });
-
-  return result.sort(
-    (a, b) => new Date(a.datetime).getTime() - new Date(b.datetime).getTime()
-  );
-}
-
-// ─── Sync one variable for one unit ──────────────────────────────────────────
-
-async function syncVariable(
-  unitNumber: number,
-  nodeId: string,
-  variableKey: string,
-  variableName: string,
-  variableIdentifier: string
-): Promise<number> {
-  // 1. Get last synced timestamp from sync_state
-  const { data: stateRow } = await supabase
-    .from("sync_state")
-    .select("last_synced_timestamp")
-    .eq("node_id", nodeId)
-    .eq("variable_key", variableKey)
-    .single();
-
-  const now = Math.floor(Date.now() / 1000);
-  const RAW_WINDOW = 6 * 3600; // raw kept 6h only — dashboards chart 5min/hourly
-  // beyond that, and Tier-1 analytics pulls raw from Anedya directly. The old
-  // 48h window let ~330k raw rows/day/active-unit pile up and (with the
-  // silently-failing retention job) blew the free-tier disk quota July 2026.
-  const rawCutoff = now - RAW_WINDOW;
-
-  // First-sync backfill window. The original 365-day default pulled ~2.7M
-  // rows across the fleet and blew through the free tier's 500MB disk
-  // (read-only lockout, June 2026). Keep it small; raise per-run with
-  // SYNC_BACKFILL_DAYS if a deeper backfill is ever genuinely needed.
-  const BACKFILL_DAYS = Math.max(1, Number(process.env.SYNC_BACKFILL_DAYS ?? 30));
-  const lastSynced = stateRow?.last_synced_timestamp || (now - BACKFILL_DAYS * 86400);
-
-  // Skip if we synced very recently (within 60 seconds)
-  if (now - lastSynced < 60) return 0;
-
-  // 2. Fetch data from Anedya in chunks (10k limit per call)
-  const CHUNK_SIZE = 30 * 86400; // 30 days
-  const allPoints: HistoricalPoint[] = [];
-  let cursor = lastSynced;
-
-  while (cursor < now) {
-    const chunkEnd = Math.min(cursor + CHUNK_SIZE, now);
-    try {
-      const chunk = await getHistoricalData(
-        nodeId,
-        variableIdentifier,
-        cursor,
-        chunkEnd
-      );
-      allPoints.push(...chunk);
-
-      // If we hit the 10k limit, there's more data in this chunk
-      if (chunk.length >= 10000) {
-        const lastTs = Math.floor(
-          new Date(chunk[chunk.length - 1].datetime).getTime() / 1000
-        );
-        cursor = lastTs + 1;
-      } else {
-        cursor = chunkEnd;
-      }
-    } catch (err) {
-      console.error(
-        `Sync error: unit ${unitNumber}, var ${variableKey}, chunk ${cursor}-${chunkEnd}:`,
-        err
-      );
-      cursor = chunkEnd;
-    }
-  }
-
-  if (allPoints.length === 0) return 0;
-
-  // Drop hardware-impossible readings (sensor glitches, ADC spikes) before
-  // they pollute sensor_readings and bake themselves into the 5min/hourly
-  // aggregation views' MIN/MAX columns.
-  const cleanPoints = filterValidReadings(allPoints, variableName);
-
-  // 3. Split into old (→ aggregate) and recent (→ raw)
-  const oldPoints = cleanPoints.filter(
-    (p) => new Date(p.datetime).getTime() / 1000 < rawCutoff
-  );
-  const recentPoints = cleanPoints.filter(
-    (p) => new Date(p.datetime).getTime() / 1000 >= rawCutoff
-  );
-
-  // 4. Aggregate old data into hourly averages
-  const hourlyPoints = aggregateToHourly(oldPoints);
-
-  // 5. Combine: hourly aggregates + raw recent data
-  const pointsToStore = [...hourlyPoints, ...recentPoints];
-
-  // 6. Deduplicate by timestamp
-  const seen = new Set<string>();
-  const dedupedPoints = pointsToStore.filter((p) => {
-    if (seen.has(p.datetime)) return false;
-    seen.add(p.datetime);
-    return true;
-  });
-
-  // 7. Upsert into sensor_readings in batches of 500
-  const BATCH_SIZE = 500;
-  let inserted = 0;
-
-  for (let i = 0; i < dedupedPoints.length; i += BATCH_SIZE) {
-    const batch = dedupedPoints.slice(i, i + BATCH_SIZE).map((p) => ({
-      unit_number: unitNumber,
-      node_id: nodeId,
-      variable_key: variableKey,
-      variable_name: variableName,
-      value: p.value,
-      recorded_at: p.datetime,
-    }));
-
-    const { error } = await supabase
-      .from("sensor_readings")
-      .upsert(batch, { onConflict: "node_id,variable_key,recorded_at" });
-
-    if (error) {
-      console.error(
-        `Upsert error: unit ${unitNumber}, var ${variableKey}, batch ${i}:`,
-        error.message
-      );
-    } else {
-      inserted += batch.length;
-    }
-  }
-
-  // 8. Update sync cursor
-  const latestTimestamp = Math.floor(
-    new Date(allPoints[allPoints.length - 1].datetime).getTime() / 1000
-  );
-
-  await supabase.from("sync_state").upsert(
-    {
-      node_id: nodeId,
-      variable_key: variableKey,
-      last_synced_timestamp: latestTimestamp,
-      updated_at: new Date().toISOString(),
-    },
-    { onConflict: "node_id,variable_key" }
-  );
-
-  const ratio = allPoints.length > 0
-    ? Math.round((1 - dedupedPoints.length / allPoints.length) * 100)
-    : 0;
-  if (allPoints.length > 1000) {
-    console.log(
-      `  ↳ ${allPoints.length} raw → ${dedupedPoints.length} stored (${ratio}% compression)`
-    );
-  }
-
-  return inserted;
 }
 
 // ─── Sync unit snapshot (live readings + status) ─────────────────────────────
@@ -241,11 +47,9 @@ async function syncUnitSnapshot(unitNumber: number, nodeId: string) {
       getLatestData(nodeId, "location"),
     ]);
 
-  // Field plan: prefer Anedya /data/latest; if that endpoint is failing
-  // (it 500s during Anedya outages), fall back to the newest value we
-  // already have in sensor_readings (the historical endpoint stays up).
-  // Anything still unknown is OMITTED from the upsert so we never clobber
-  // a previously-good value with null.
+  // Field plan: values come from Anedya /data/latest; anything failed or
+  // out-of-bounds is OMITTED from the upsert so we never clobber a
+  // previously-good snapshot value with null.
   const plan: {
     col: string;
     key: string;
@@ -277,25 +81,10 @@ async function syncUnitSnapshot(unitNumber: number, nodeId: string) {
       row[p.col] = p.str ? String(p.res.data) : (p.res.data as number);
       if (typeof p.res.timestamp === "number" && p.res.timestamp > 0)
         tsMs.push(p.res.timestamp * 1000);
-    } else {
-      // Fallback: latest sensor_readings row for this unit+variable.
-      const { data: last } = await supabase
-        .from("sensor_readings")
-        .select("value, recorded_at")
-        .eq("unit_number", unitNumber)
-        .eq("variable_key", p.key)
-        .order("recorded_at", { ascending: false })
-        .limit(1)
-        .maybeSingle();
-      const fallbackValid =
-        p.str ||
-        (typeof last?.value === "number" && isValidReading(p.col, last.value));
-      if (last && last.value != null && fallbackValid) {
-        row[p.col] = p.str ? String(last.value) : (last.value as number);
-        tsMs.push(new Date(last.recorded_at).getTime());
-      }
-      // else: leave column out → existing value preserved (no clobber).
     }
+    // On a failed/invalid read the column is simply omitted, preserving the
+    // previous snapshot value. (The old sensor_readings fallback is gone —
+    // that table is being retired with the Anedya-direct migration.)
   }
 
   // Location only if Anedya returned it; otherwise omit (preserve prior).
@@ -376,34 +165,13 @@ export async function runSync(
   const logId = logRow?.id;
 
   const unitNumbers = getUnitNumbers();
-  const vars = getAllVariables();
-
-  // Filter to numeric variables only (skip location, deviceStatus)
-  const numericVars = vars.filter(
-    (v) => v.identifier !== "location" && v.identifier !== "deviceStatus"
-  );
-
-  console.log(
-    `[Sync] Starting sync for ${unitNumbers.length} units × ${numericVars.length} variables`
-  );
-  console.log(
-    `[Sync] Strategy: hourly aggregates for data >48h old, raw for recent data`
-  );
-
-  // Tunable concurrency (env-overridable without a code change). Defaults
-  // chosen to cut a full run from ~17 min to a few min without hammering
-  // Anedya: up to UNIT_CC units, each running VAR_CC variable syncs.
+  console.log(`[Sync] Snapshot refresh for ${unitNumbers.length} units`);
   const UNIT_CC = Math.max(1, Number(process.env.SYNC_UNIT_CONCURRENCY ?? 5));
-  const VAR_CC = Math.max(1, Number(process.env.SYNC_VAR_CONCURRENCY ?? 4));
-  console.log(
-    `[Sync] Concurrency: ${UNIT_CC} units × ${VAR_CC} vars in flight`
-  );
 
   await runPool(unitNumbers, UNIT_CC, async (unitNum) => {
     const nodeId = getNodeId(unitNum);
     if (!nodeId) return;
 
-    // A snapshot failure must not block this unit's historical sync.
     try {
       await syncUnitSnapshot(unitNum, nodeId);
       console.log(`[Sync] Unit ${unitNum}: snapshot updated`);
@@ -413,29 +181,6 @@ export async function runSync(
       console.error(`[Sync] Error: ${msg}`);
     }
 
-    if (snapshotOnly) return; // skip historical backfill in fast mode
-
-    await runPool(numericVars, VAR_CC, async (v) => {
-      try {
-        const points = await syncVariable(
-          unitNum,
-          nodeId,
-          v.key,
-          v.name,
-          v.identifier
-        );
-        totalPoints += points;
-        if (points > 0) {
-          console.log(
-            `[Sync] Unit ${unitNum} / ${v.name}: ${points} points stored`
-          );
-        }
-      } catch (err: any) {
-        const msg = `Unit ${unitNum} / ${v.name}: ${err.message}`;
-        errors.push(msg);
-        console.error(`[Sync] Error: ${msg}`);
-      }
-    });
   });
 
   const duration = Math.round((Date.now() - startTime) / 1000);
@@ -482,7 +227,7 @@ export async function runSync(
       units_synced: unitNumbers.length,
       points_synced: totalPoints,
       error_message: errors.length > 0 ? errors.join("; ") : null,
-      details: { duration, variableCount: numericVars.length },
+      details: { duration, snapshotOnly },
     }).eq("id", logId);
   }
 

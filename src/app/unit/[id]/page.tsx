@@ -9,10 +9,10 @@ import {
 } from "@/lib/anedya";
 import {
   getUnitSnapshotFromSupabase,
-  getAllHistoricalDataFromSupabase,
   type Bucket,
   type ChartPoint,
 } from "@/lib/supabase-data";
+import { fetchAllHistoryViaApi } from "@/lib/telemetry-client";
 import { buildCsvFromHistory, downloadFile, generateUnitReport } from "@/lib/export";
 import { sanitizeChartPoints } from "@/lib/sensor-bounds";
 import {
@@ -357,9 +357,7 @@ export default function UnitDetailPage() {
     try {
       const now = Math.floor(Date.now() / 1000);
       const fromTime = now - 365 * 86400;
-      const allData = await getAllHistoricalDataFromSupabase(
-        unitNumber, fromTime, now
-      );
+      const allData = await fetchAllHistoryViaApi(unitNumber, fromTime, now);
       const csv = buildCsvFromHistory(allData, unitNumber);
       if (csv) {
         const date = new Date().toISOString().slice(0, 10);
@@ -378,9 +376,7 @@ export default function UnitDetailPage() {
     try {
       const now = Math.floor(Date.now() / 1000);
       const fromTime = now - 365 * 86400;
-      const allData = await getAllHistoricalDataFromSupabase(
-        unitNumber, fromTime, now
-      );
+      const allData = await fetchAllHistoryViaApi(unitNumber, fromTime, now);
       generateUnitReport(unit, allData);
     } catch (err) {
       console.error("PDF report failed:", err);
