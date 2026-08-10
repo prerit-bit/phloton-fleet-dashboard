@@ -266,7 +266,9 @@ export async function getAggregatedData(
       const ts = entry.timestamp > 1e12 ? entry.timestamp : entry.timestamp * 1000;
       points.push({
         datetime: new Date(ts).toISOString(),
-        value: entry.value,
+        // the aggregates endpoint names the value field "aggregate";
+        // only /data/getData uses "value"
+        value: entry.aggregate ?? entry.value,
       });
     }
   }
