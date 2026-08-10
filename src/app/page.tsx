@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useState, useEffect, useCallback } from "react";
 import dynamic from "next/dynamic";
 import type { UnitSnapshot } from "@/lib/anedya";
@@ -120,6 +121,12 @@ export default function DashboardPage() {
               })}
             </span>
           )}
+          <Link
+            href="/health"
+            className="rounded-lg border border-navy-100 bg-white px-3 py-2 text-sm font-medium text-navy-800 shadow-sm transition hover:bg-navy-50 active:scale-95"
+          >
+            Fleet health
+          </Link>
           <button
             onClick={handleFleetCsv}
             className="rounded-lg border border-navy-100 bg-white px-3 py-2 text-sm font-medium text-navy-800 shadow-sm transition hover:bg-navy-50 active:scale-95"

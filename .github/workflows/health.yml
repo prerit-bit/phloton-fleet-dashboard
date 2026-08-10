@@ -1,0 +1,43 @@
+name: Daily Device Health
+
+on:
+  schedule:
+    - cron: "0 3 * * *"   # 03:00 UTC ≈ 08:30 IST, after the day's data lands
+  workflow_dispatch: {}
+
+concurrency:
+  group: phloton-health
+  cancel-in-progress: false
+
+jobs:
+  health:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install --quiet pandas numpy requests
+      # Raw-day cache persists between runs so dailies only fetch new days.
+      - uses: actions/cache@v4
+        with:
+          path: health/data/cache
+          key: health-cache-v1-${{ github.run_id }}
+          restore-keys: health-cache-v1-
+      - name: Discover activity (last 60 days)
+        working-directory: health
+        run: python discover.py 60
+        env:
+          ANEDYA_API_KEY: ${{ secrets.ANEDYA_API_KEY }}
+          NEXT_PUBLIC_NODES_ID: ${{ secrets.NEXT_PUBLIC_NODES_ID }}
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      - name: Compute + publish unit health
+        working-directory: health
+        run: python health.py publish
+        env:
+          ANEDYA_API_KEY: ${{ secrets.ANEDYA_API_KEY }}
+          NEXT_PUBLIC_NODES_ID: ${{ secrets.NEXT_PUBLIC_NODES_ID }}
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
