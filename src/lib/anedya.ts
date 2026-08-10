@@ -11,7 +11,11 @@
 const BASE_URL = "https://api.anedya.io/v1";
 
 function getApiKey(): string {
-  return process.env.NEXT_PUBLIC_ANEDYA_API_KEY || "";
+  // Server-only ANEDYA_API_KEY preferred; the NEXT_PUBLIC_ fallback predates
+  // the /api/telemetry proxy and ships to the browser bundle — it exists only
+  // until every consumer (sync scripts, GH Actions) migrates. New code paths
+  // run server-side and should never expose the key.
+  return process.env.ANEDYA_API_KEY || process.env.NEXT_PUBLIC_ANEDYA_API_KEY || "";
 }
 
 function getNodesConfig(): Record<string, string> {

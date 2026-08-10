@@ -9,7 +9,6 @@ import {
 } from "@/lib/anedya";
 import {
   getUnitSnapshotFromSupabase,
-  getHistoricalDataFromSupabase,
   getAllHistoricalDataFromSupabase,
   type Bucket,
   type ChartPoint,
@@ -294,13 +293,19 @@ export default function UnitDetailPage() {
           const varConfig = AVAILABLE_VARS.find((v) => v.name === varName);
           if (!varConfig) return { name: varName, data: [] as ChartPoint[] };
 
-          let data = await getHistoricalDataFromSupabase(
-            unitNumber,
-            varConfig.key,
-            fromTime,
-            now,
-            bucket
-          );
+          // Anedya-direct via the authorized server proxy — Supabase no
+          // longer stores chart history (see /api/telemetry/route.ts).
+          let data: ChartPoint[] = [];
+          try {
+            const res = await fetch(
+              `/api/telemetry?unit=${unitNumber}&key=${varConfig.key}` +
+                `&from=${fromTime}&to=${now}&bucket=${bucket}`
+            );
+            if (res.ok) data = (await res.json()).points ?? [];
+            else console.error(`telemetry ${varName}: HTTP ${res.status}`);
+          } catch (err) {
+            console.error(`telemetry ${varName}:`, err);
+          }
           data = sanitizeChartPoints(data, varName);
 
           // Downsample if needed, but always preserve the latest point.
