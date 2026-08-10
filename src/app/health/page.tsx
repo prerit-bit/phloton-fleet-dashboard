@@ -67,6 +67,39 @@ const TIERS = [
   { range: "< 50", label: "Action needed", cls: "text-red-700", desc: "multiple indicators failing or a critical fault signature" },
 ];
 
+
+/** Axis label + plain-language reading guide, per indicator. */
+const HI_META: Record<string, { axis: string; worse: "up" | "down"; pct?: boolean; read: string }> = {
+  tau_hr: {
+    axis: "Hours", worse: "down",
+    read: "How long the flask holds its cold once the cooler stops. A falling line means insulation or the lid seal is degrading — every watt of cooling buys less holdover than it used to.",
+  },
+  hs_rise: {
+    axis: "°C above ambient", worse: "up",
+    read: "How much hotter the heatsink runs than the surrounding air while cooling. Climbing means the fan is wearing or the fins are dusty. Below zero is physically impossible — the hot side cannot be colder than the room — and points at a miswired sensor.",
+  },
+  r_int: {
+    axis: "Ohms (Ω)", worse: "up",
+    read: "Battery internal resistance, read from the voltage sag each time the cooler switches on. A rising line is the classic early sign of pack ageing — it shows up long before you notice lost runtime.",
+  },
+  duty_per_dT: {
+    axis: "Duty fraction per °C", worse: "up",
+    read: "How hard the cooler has to work for each degree it holds below ambient. Rising means the thermoelectric module or its thermal paste is losing efficiency: same job, more power.",
+  },
+  coverage: {
+    axis: "% of day reported", worse: "down", pct: true,
+    read: "How much of the day the unit actually sent data. A falling line means the modem is fading — this is the indicator that flagged both units we permanently lost, weeks before they went dark.",
+  },
+  sensor_bad_frac: {
+    axis: "% of readings bad", worse: "up", pct: true,
+    read: "Share of the day's readings that were physically impossible, out of range, or frozen at one value. A rising line means a sensor is failing — the unit may still cool fine while reporting numbers you cannot trust.",
+  },
+  excursion_min: {
+    axis: "Minutes per day", worse: "up",
+    read: "Minutes per day the payload sat above 8 °C while the unit was trying to cool. This is the failure a customer actually experiences, so it is scored on outcome rather than cause.",
+  },
+};
+
 function scoreColor(s: number | null): string {
   if (s === null) return "text-gray-400";
   if (s >= 85) return "text-emerald-600";
@@ -94,40 +127,46 @@ function chartedIndicators(r: HealthRow): [string, SeriesSpec][] {
     .map((x) => [x.k, x.s] as [string, SeriesSpec]);
 }
 
-function IndicatorChart({ spec }: { spec: SeriesSpec }) {
-  const vals = spec.points.map((p) => p.v);
+function IndicatorChart({ hiKey, spec }: { hiKey: string; spec: SeriesSpec }) {
+  const meta = HI_META[hiKey];
+  const scale = meta?.pct ? 100 : 1;
+  const vals = spec.points.map((p) => p.v * scale);
   const lo = Math.min(...vals), hi = Math.max(...vals);
   const pad = Math.max((hi - lo) * 0.25, Math.abs(hi || 1) * 0.05, 0.05);
   let dMin = lo - pad, dMax = hi + pad;
 
   // Only draw the alarm line if it sits near the data — otherwise it would
   // flatten the very drift we're trying to show. Named in the caption instead.
-  const thr = spec.threshold;
+  const thr = spec.threshold === null || spec.threshold === undefined ? null : spec.threshold * scale;
   const thrInView =
     thr !== null && thr !== undefined && thr >= dMin - (dMax - dMin) && thr <= dMax + (dMax - dMin);
   if (thrInView && thr !== null && thr !== undefined) {
     dMin = Math.min(dMin, thr - pad); dMax = Math.max(dMax, thr + pad);
   }
-  const base = spec.baseline;
-  const data = spec.points.map((p) => ({ ...p, label: shortDate(p.d) }));
+  const base = spec.baseline === null || spec.baseline === undefined ? null : spec.baseline * scale;
+  const data = spec.points.map((p) => ({ ...p, v: p.v * scale, label: shortDate(p.d) }));
+  const unitSuffix = meta?.pct ? "%" : spec.unit ? ` ${spec.unit}` : "";
 
   return (
     <div className="rounded-lg border border-navy-100 p-3">
       <div className="mb-1 flex items-baseline justify-between gap-2">
         <span className="text-xs font-semibold text-navy-800">{spec.label}</span>
         <span className="text-[10px] text-navy-200">
-          {vals[vals.length - 1].toFixed(2)}{spec.unit ? ` ${spec.unit}` : ""}
+          now {vals[vals.length - 1].toFixed(meta?.pct ? 1 : 2)}{unitSuffix}
+          {meta && <span className="ml-1">· {meta.worse === "up" ? "higher is worse" : "lower is worse"}</span>}
         </span>
       </div>
       <ResponsiveContainer width="100%" height={130}>
-        <LineChart data={data} margin={{ top: 4, right: 8, left: -18, bottom: 0 }}>
+        <LineChart data={data} margin={{ top: 4, right: 8, left: 2, bottom: 0 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
           <XAxis dataKey="label" tick={{ fontSize: 9, fill: "#94A3B8" }} interval="preserveStartEnd" minTickGap={24} />
-          <YAxis domain={[dMin, dMax]} tick={{ fontSize: 9, fill: "#94A3B8" }} width={38}
-            tickFormatter={(v: number) => (Math.abs(v) >= 100 ? v.toFixed(0) : v.toFixed(2))} />
+          <YAxis domain={[dMin, dMax]} tick={{ fontSize: 9, fill: "#94A3B8" }} width={58}
+            tickFormatter={(v: number) => (Math.abs(v) >= 100 ? v.toFixed(0) : Math.abs(v) >= 10 ? v.toFixed(1) : v.toFixed(2))}
+            label={{ value: meta?.axis ?? spec.unit ?? "", angle: -90, position: "insideLeft",
+                     style: { fontSize: 9, fill: "#64748B", textAnchor: "middle" } }} />
           <Tooltip
             contentStyle={{ fontSize: 11, borderRadius: 8, border: "1px solid #E2E8F0" }}
-            formatter={(v: any) => [`${Number(v).toFixed(3)}${spec.unit ? ` ${spec.unit}` : ""}`, spec.label]}
+            formatter={(v: any) => [`${Number(v).toFixed(meta?.pct ? 1 : 3)}${unitSuffix}`, spec.label]}
           />
           {base !== null && base !== undefined && (
             <ReferenceLine y={base} stroke="#64748B" strokeDasharray="4 3" strokeWidth={1}
@@ -144,9 +183,10 @@ function IndicatorChart({ spec }: { spec: SeriesSpec }) {
           <Line type="monotone" dataKey="v" stroke="#0EA5E9" strokeWidth={1.8} dot={{ r: 1.5 }} isAnimationActive={false} />
         </LineChart>
       </ResponsiveContainer>
-      {!thrInView && thr !== null && thr !== undefined && (
-        <p className="mt-1 text-[10px] text-navy-200">Alarm level {thr}{spec.unit ? ` ${spec.unit}` : ""} — off-chart</p>
+      {!thrInView && thr !== null && (
+        <p className="mt-1 text-[10px] text-navy-200">Alarm level {thr}{unitSuffix} — beyond this chart&apos;s range</p>
       )}
+      {meta && <p className="mt-2 text-[11px] leading-relaxed text-navy-200">{meta.read}</p>}
     </div>
   );
 }
@@ -200,14 +240,18 @@ export default function HealthPage() {
         <section className="mb-6 rounded-2xl border border-navy-100 bg-white p-6 shadow-sm">
           <h2 className="text-sm font-bold uppercase tracking-wide text-navy-200">Fleet health ranking</h2>
           <p className="mt-1 text-xs text-navy-200">
-            Lowest scores first — bar colour is the action tier. Units with no telemetry in the window are not scored.
+            Each bar is one unit; taller is healthier. Bar colour repeats the action tier, and the dashed lines are the
+            tier boundaries — a bar below the red line needs attention now, below amber needs review. Units with no
+            telemetry in the window aren&apos;t scored and don&apos;t appear here.
           </p>
           <div className="mt-4">
             <ResponsiveContainer width="100%" height={220}>
               <BarChart data={fleetData} margin={{ top: 4, right: 8, left: -18, bottom: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" vertical={false} />
                 <XAxis dataKey="unit" tick={{ fontSize: 10, fill: "#64748B" }} />
-                <YAxis domain={[0, 100]} tick={{ fontSize: 10, fill: "#94A3B8" }} width={38} />
+                <YAxis domain={[0, 100]} tick={{ fontSize: 10, fill: "#94A3B8" }} width={58}
+                  label={{ value: "Health score (0–100)", angle: -90, position: "insideLeft",
+                           style: { fontSize: 10, fill: "#64748B", textAnchor: "middle" } }} />
                 <Tooltip cursor={{ fill: "#F8FAFC" }} contentStyle={{ fontSize: 11, borderRadius: 8, border: "1px solid #E2E8F0" }}
                   formatter={(v: any) => [`${v} / 100`, "Health score"]} />
                 <ReferenceLine y={85} stroke="#10B981" strokeDasharray="4 3" strokeWidth={1}
@@ -271,10 +315,14 @@ export default function HealthPage() {
       <section>
         <h2 className="mb-1 text-sm font-bold uppercase tracking-wide text-navy-200">Units — points of concern</h2>
         <p className="mb-3 text-xs text-navy-200">
-          Charts show the evidence: the indicator&apos;s own history, the unit&apos;s{" "}
-          <span className="font-medium text-navy-800">baseline</span> (grey),
-          the <span className="font-medium text-red-600">alarm level</span> (red), and the day{" "}
-          <span className="font-medium text-amber-600">drift</span> was first detected.
+          Each chart plots one health indicator over time for that unit. The{" "}
+          <span className="font-medium text-navy-800">horizontal axis is the date</span>; the{" "}
+          <span className="font-medium text-navy-800">vertical axis is labelled with what is being measured</span> —
+          hours, °C, ohms, minutes or a percentage. The grey dashed line is that unit&apos;s{" "}
+          <span className="font-medium text-navy-800">own baseline</span> (its normal, learned from its early history),
+          the red dashed line is the <span className="font-medium text-red-600">alarm level</span> where we act, and the
+          amber line marks the day <span className="font-medium text-amber-600">drift</span> was first detected. The
+          gap between the trace and the grey line is how far this device has moved from its own normal.
         </p>
         {error && <p className="text-sm text-red-600">Failed to load health data: {error}</p>}
         {!rows && !error && <p className="text-sm text-navy-200">Loading…</p>}
@@ -324,7 +372,7 @@ export default function HealthPage() {
                     </button>
                     {isOpen && (
                       <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                        {charts.map(([k, spec]) => <IndicatorChart key={k} spec={spec} />)}
+                        {charts.map(([k, spec]) => <IndicatorChart key={k} hiKey={k} spec={spec} />)}
                       </div>
                     )}
                   </>
