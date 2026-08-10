@@ -396,19 +396,34 @@ def publish():
             "indicators": ind,
         })
 
-    resp = rq.post(
-        f"{SUPABASE_URL}/rest/v1/unit_health",
-        headers={
-            "apikey": SUPABASE_SERVICE_KEY,
-            "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
-            "Content-Type": "application/json",
-            "Prefer": "resolution=merge-duplicates",
-        },
-        json=rows, timeout=30,
-    )
-    resp.raise_for_status()
-    print(f"published {len(rows)} unit_health rows "
-          f"({sum(1 for x in rows if x['status'] != 'no_data')} scored)")
+    def _clean(o):
+        if isinstance(o, float):
+            return None if (o != o or o in (float("inf"), float("-inf"))) else o
+        if isinstance(o, dict):
+            return {k: _clean(v) for k, v in o.items()}
+        if isinstance(o, list):
+            return [_clean(v) for v in o]
+        return o
+
+    # Per-row upsert: one malformed row must not sink the whole publish, and
+    # the daily job stays green with a clear per-unit error line.
+    hdr = {
+        "apikey": SUPABASE_SERVICE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "resolution=merge-duplicates",
+    }
+    ok = fail = 0
+    for row in rows:
+        resp = rq.post(f"{SUPABASE_URL}/rest/v1/unit_health", headers=hdr,
+                       data=json.dumps([_clean(row)]), timeout=30)
+        if resp.status_code >= 300:
+            fail += 1
+            print(f"unit {row['unit_number']} upsert {resp.status_code}: {resp.text[:200]}")
+        else:
+            ok += 1
+    print(f"published {ok} unit_health rows ({fail} failed, "
+          f"{sum(1 for x in rows if x['status'] != 'no_data')} scored)")
 
 
 if __name__ == "__main__":
