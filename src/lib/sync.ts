@@ -444,6 +444,36 @@ export async function runSync(
     `[Sync] Complete: ${totalPoints} points stored in ${duration}s (${errors.length} errors)`
   );
 
+  // Disk-size guard — the July 2026 lockout gave zero warning because nothing
+  // watched pg_database_size. Full runs check it; past SIZE_ALERT_MB we ping
+  // the ops Telegram (damped to ~hourly via the minutes window).
+  if (!snapshotOnly) {
+    try {
+      const { data: sizeMb } = await supabase.rpc("phloton_db_size_mb");
+      if (typeof sizeMb === "number") {
+        console.log(`[Sync] DB size: ${sizeMb} MB`);
+        const limit = Number(process.env.SIZE_ALERT_MB ?? 350);
+        const token = process.env.TELEGRAM_BOT_TOKEN;
+        const chat = process.env.OPS_TELEGRAM_CHAT_ID;
+        if (sizeMb > limit && token && chat && new Date().getUTCMinutes() < 5) {
+          await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              chat_id: chat,
+              text:
+                `⚠️ Phloton DB at ${sizeMb} MB (alert threshold ${limit}, ` +
+                `free-tier limit 500). Run retention/VACUUM or slim now — ` +
+                `at 500 MB Supabase pauses the project with no self-service exit.`,
+            }),
+          });
+        }
+      }
+    } catch {
+      // guard must never break the sync
+    }
+  }
+
   // Update log
   if (logId) {
     await supabase.from("sync_log").update({

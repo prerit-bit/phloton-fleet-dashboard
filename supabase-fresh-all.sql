@@ -1,7 +1,7 @@
 
--- ╔══════════════════════════════════════════════════════════════════╗
--- ║  SOURCE: supabase-schema.sql
--- ╚══════════════════════════════════════════════════════════════════╝
+-- ════════════════════════════════════════════════════════════════════════
+-- SOURCE: supabase-schema.sql
+-- ════════════════════════════════════════════════════════════════════════
 -- ============================================================================
 -- Phloton Fleet Dashboard — Supabase Schema
 -- Run this in your Supabase SQL Editor to set up the database.
@@ -105,9 +105,9 @@ CREATE POLICY "Service role full access" ON sync_state
 CREATE POLICY "Service role full access" ON sync_log
   FOR ALL USING (true) WITH CHECK (true);
 
--- ╔══════════════════════════════════════════════════════════════════╗
--- ║  SOURCE: supabase-5min-schema.sql
--- ╚══════════════════════════════════════════════════════════════════╝
+-- ════════════════════════════════════════════════════════════════════════
+-- SOURCE: supabase-5min-schema.sql
+-- ════════════════════════════════════════════════════════════════════════
 -- ============================================================================
 -- Phloton — 5-minute aggregation view (finer chart resolution for 6h/24h).
 -- Run in the Supabase SQL Editor. Additive; doesn't change existing data.
@@ -135,9 +135,9 @@ GROUP BY
 REVOKE ALL  ON sensor_readings_5min FROM anon;
 GRANT SELECT ON sensor_readings_5min TO authenticated;
 
--- ╔══════════════════════════════════════════════════════════════════╗
--- ║  SOURCE: supabase-auth-schema.sql
--- ╚══════════════════════════════════════════════════════════════════╝
+-- ════════════════════════════════════════════════════════════════════════
+-- SOURCE: supabase-auth-schema.sql
+-- ════════════════════════════════════════════════════════════════════════
 -- ============================================================================
 -- Phloton Fleet Dashboard — Auth & Per-User Access (Phase 1)
 --
@@ -320,9 +320,9 @@ GRANT SELECT ON sensor_readings_hourly TO authenticated;
 --   SELECT id, 19 FROM auth.users WHERE email = 'customer@example.com';
 -- ============================================================================
 
--- ╔══════════════════════════════════════════════════════════════════╗
--- ║  SOURCE: supabase-alerts-schema.sql
--- ╚══════════════════════════════════════════════════════════════════╝
+-- ════════════════════════════════════════════════════════════════════════
+-- SOURCE: supabase-alerts-schema.sql
+-- ════════════════════════════════════════════════════════════════════════
 -- ============================================================================
 -- Phloton — alert engine state + audit log.
 -- Run in the Supabase SQL Editor after supabase-auth-schema.sql.
@@ -368,9 +368,9 @@ ALTER TABLE device_alerts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE alert_events  ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON device_alerts, alert_events FROM anon, authenticated;
 
--- ╔══════════════════════════════════════════════════════════════════╗
--- ║  SOURCE: supabase-geocode-schema.sql
--- ╚══════════════════════════════════════════════════════════════════╝
+-- ════════════════════════════════════════════════════════════════════════
+-- SOURCE: supabase-geocode-schema.sql
+-- ════════════════════════════════════════════════════════════════════════
 -- ============================================================================
 -- Phloton — cached reverse-geocoded place name for units.
 -- Run in the Supabase SQL Editor (alongside supabase-alerts-schema.sql).
@@ -384,9 +384,9 @@ ALTER TABLE public.unit_snapshots
   ADD COLUMN IF NOT EXISTS location_name TEXT,
   ADD COLUMN IF NOT EXISTS geocoded_key  TEXT;
 
--- ╔══════════════════════════════════════════════════════════════════╗
--- ║  SOURCE: supabase-whatsapp-schema.sql
--- ╚══════════════════════════════════════════════════════════════════╝
+-- ════════════════════════════════════════════════════════════════════════
+-- SOURCE: supabase-whatsapp-schema.sql
+-- ════════════════════════════════════════════════════════════════════════
 -- ============================================================================
 -- Phloton — chat-agent identity mapping (prototype).
 -- Maps a WhatsApp number and/or Telegram user id to a Phloton user.
@@ -420,9 +420,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_profiles_telegram
 --   WHERE email = 'prerit@phloton.com';
 -- ============================================================================
 
--- ╔══════════════════════════════════════════════════════════════════╗
--- ║  SOURCE: supabase-retention-schema.sql
--- ╚══════════════════════════════════════════════════════════════════╝
+-- ════════════════════════════════════════════════════════════════════════
+-- SOURCE: supabase-retention-schema.sql
+-- ════════════════════════════════════════════════════════════════════════
 -- ============================================================================
 -- Phloton — retention policy: aggregate raw rows >7 days old into hourly.
 --
@@ -512,13 +512,94 @@ REVOKE ALL ON FUNCTION public.phloton_retention_step() FROM PUBLIC, anon, authen
 --   VACUUM ANALYZE sensor_readings;
 --   VACUUM ANALYZE sync_log;
 
--- ╔══════════════════════════════════════════════════════════════════╗
--- ║  POST-SETUP FIXES (fresh-project rebuild, June 2026)
--- ╚══════════════════════════════════════════════════════════════════╝
--- uq_reading already covers (node_id, variable_key, recorded_at);
--- this duplicate index cost ~300-400MB on the old project.
+-- ════════════════════════════════════════════════════════════════════════
+-- REBUILD POST-FIXES v2 (July 2026) — run as part of the single paste.
+-- Everything below overrides/extends the files above with the lessons from
+-- both quota incidents. CREATE OR REPLACE wins over earlier definitions.
+-- ════════════════════════════════════════════════════════════════════════
+
+-- (a) uq_reading already covers (node_id, variable_key, recorded_at); this
+--     second index was ~25% of the June disk bill for zero query benefit.
 DROP INDEX IF EXISTS idx_readings_node_var_time;
 
+-- (b) The index the retention oldest-row probe needs. Without it the probe
+--     full-scans, times out, and (pre-fix) the job silently no-opped green
+--     while raw rows filled the quota.
+CREATE INDEX IF NOT EXISTS idx_readings_recorded_at
+  ON sensor_readings (recorded_at);
+
+-- (c) Retention cutoff 1 DAY (the file above says 7 days — this wins).
+CREATE OR REPLACE FUNCTION public.phloton_retention_step()
+RETURNS TABLE (buckets_aggregated INT, rows_deleted INT)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_buckets INT := 0;
+  v_deleted INT := 0;
+BEGIN
+  CREATE TEMP TABLE IF NOT EXISTS _old_buckets ON COMMIT DROP AS
+  SELECT
+    unit_number,
+    MIN(node_id)       AS node_id,
+    variable_key,
+    MIN(variable_name) AS variable_name,
+    date_trunc('hour', recorded_at) AS bucket,
+    AVG(value)         AS avg_val
+  FROM sensor_readings
+  WHERE recorded_at < NOW() - INTERVAL '1 day'
+  GROUP BY unit_number, variable_key, date_trunc('hour', recorded_at)
+  HAVING COUNT(*) > 1
+      OR (COUNT(*) = 1
+          AND date_trunc('hour', MIN(recorded_at)) <> MIN(recorded_at));
+
+  SELECT COUNT(*) INTO v_buckets FROM _old_buckets;
+
+  INSERT INTO sensor_readings (
+    unit_number, node_id, variable_key, variable_name,
+    value, recorded_at, synced_at
+  )
+  SELECT
+    unit_number, node_id, variable_key, variable_name,
+    avg_val, bucket, NOW()
+  FROM _old_buckets
+  ON CONFLICT (node_id, variable_key, recorded_at)
+  DO UPDATE SET value = EXCLUDED.value;
+
+  WITH d AS (
+    DELETE FROM sensor_readings sr
+    USING _old_buckets ob
+    WHERE sr.unit_number  = ob.unit_number
+      AND sr.variable_key = ob.variable_key
+      AND date_trunc('hour', sr.recorded_at) = ob.bucket
+      AND sr.recorded_at < NOW() - INTERVAL '1 day'
+      AND sr.recorded_at <> ob.bucket
+    RETURNING 1
+  )
+  SELECT COUNT(*) INTO v_deleted FROM d;
+
+  DELETE FROM sync_log WHERE started_at < NOW() - INTERVAL '30 days';
+
+  RETURN QUERY SELECT v_buckets, v_deleted;
+END;
+$$;
+REVOKE ALL ON FUNCTION public.phloton_retention_step() FROM PUBLIC, anon, authenticated;
+
+-- (d) Size guard RPC — sync calls this each full run and Telegram-alerts
+--     past SIZE_ALERT_MB (default 350) so quota approach is a warning,
+--     never a surprise brick.
+CREATE OR REPLACE FUNCTION public.phloton_db_size_mb()
+RETURNS INT
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  SELECT (pg_database_size(current_database()) / 1024 / 1024)::INT;
+$$;
+REVOKE ALL ON FUNCTION public.phloton_db_size_mb() FROM PUBLIC, anon, authenticated;
+
+-- (e) Nightly VACUUM, 30 min after the retention workflow.
 CREATE EXTENSION IF NOT EXISTS pg_cron;
 SELECT cron.schedule('vacuum-sensor-readings', '0 4 * * *',
                      'VACUUM ANALYZE sensor_readings');

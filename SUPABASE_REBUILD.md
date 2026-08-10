@@ -89,3 +89,34 @@ Optional deeper history: old raw data lives in Google Drive as
 `phloton-raw-YYYY-MM-DD.csv.gz`; a deeper backfill can also be pulled from
 Anedya later by re-running sync with `SYNC_BACKFILL_DAYS=180` BEFORE the
 cursor exists (it only applies to first sync per node+variable).
+
+---
+
+## Rebuild #3 addendum (July 2026)
+
+Why again: the retention job's oldest-row probe timed out (no recorded_at
+index), the error was silently swallowed, and raw 5s rows accumulated to the
+quota → project paused, restore blocked (org restricted) — a circular trap
+with no free-tier exit. Fixes now baked in:
+
+- `supabase-fresh-all.sql` regenerated with a v2 tail: no duplicate index,
+  `idx_readings_recorded_at`, retention cutoff **1 day**, `phloton_db_size_mb`
+  RPC, pg_cron vacuum. One paste = fully guarded schema.
+- Code (already on main): sync raw window **6 h**, retention **fails loudly**
+  on any probe error, and each full sync checks DB size and Telegram-alerts
+  the ops chat past `SIZE_ALERT_MB` (default 350).
+
+Rebuild-#3 specific steps:
+1. **Create a NEW free org first** — the old org is under service restriction
+   and blocks both project creation and restore.
+2. New project in that org → SQL editor → paste ALL of `supabase-fresh-all.sql`.
+3. Auth → create the users → admin UPDATE + `device_owners` INSERTs (Step 4 of
+   the original runbook). Reset `profiles.telegram_id` if bot replies matter.
+4. Hand URL + anon + service_role keys to Claude for rotation across
+   `.env.local`, GitHub Actions secrets, and Vercel env + redeploy + workflow
+   re-enable + first-sync verification.
+5. After verification, the old org/project can be deleted entirely.
+
+Planned follow-on (kills the failure class): serve charts from Anedya directly
+via an authorized Next.js API route; Supabase keeps only auth + snapshots +
+alert state (~10-20 MB steady-state, immune to any quota).
